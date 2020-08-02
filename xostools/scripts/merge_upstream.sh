@@ -24,6 +24,8 @@ fi
 echo "Generating temporary manifest file"
 repo manifest > full-manifest.xml
 
+xos_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='XOS']/@revision" full-manifest.xml)
+
 while read path; do
   echo "$path"
   repo_path="$path"
@@ -55,9 +57,7 @@ while read path; do
   echo "Merging upstream"
   git merge upstream/$repo_upstream_rev
 
-  if hash xg >/dev/null 2>/dev/null; then
-    xg dpush
-  fi
+  git push XOS HEAD:$xos_revision
   popd
 
   echo

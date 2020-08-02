@@ -31,6 +31,7 @@ if [ -z "$1" ]; then
 fi
 
 revision="$1"
+xos_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='XOS']/@revision" $snippet)
 
 cd $TOP
 
@@ -70,7 +71,7 @@ done < <(xmlstarlet sel -t -v '/manifest/project[@merge-aosp="true"]/@path' $sni
 if hash xg >/dev/null 2>/dev/null; then
     while read path; do
         pushd $path
-        xg dpush || (
+        git push XOS HEAD:$xos_revision  || (
             echo -e "\e[1;91mAn error occured during dpush, please review the error.\e[0m";
             echo "If you think this isn't a problem, press ENTER to continue, otherwise CTRL+C";
             read
