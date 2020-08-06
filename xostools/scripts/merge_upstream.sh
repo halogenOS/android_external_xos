@@ -31,6 +31,7 @@ while read path; do
   repo_path="$path"
   repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
   repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
+  repo_name=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" full-manifest.xml)
   repo_xos="ssh://git@git.halogenos.org/halogenOS/$repo_name"
   echo "Upstream: $repo_upstream"
   repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
