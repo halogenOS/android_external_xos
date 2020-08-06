@@ -41,6 +41,7 @@ while read path; do
     repo_name=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" $snippet)
     repo_name_aosp=$(echo "$repo_name" | sed -e "s/android_//" -e "s/^build_make$/build/" -e "s/_/\//g")
     repo_aosp="https://android.googlesource.com/platform/$repo_name_aosp"
+    repo_xos="ssh://git@git.halogenos.org/halogenOS/$repo_name"
     echo "AOSP remote: $repo_aosp"
     echo "Revision to merge: $revision"
     repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" $snippet)
@@ -52,6 +53,13 @@ while read path; do
         git remote add aosp $repo_aosp || git remote set-url aosp $repo_aosp
     else
         git remote set-url aosp $repo_aosp
+    fi
+
+    echo "Setting XOS remote"
+    if ! git ls-remote xos >/dev/null 2>/dev/null; then
+        git remote add xos $repo_xos || git remote set-url xos $repo_xos
+    else
+        git remote set-url xos $repo_xos
     fi
 
     if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
@@ -71,7 +79,7 @@ done < <(xmlstarlet sel -t -v '/manifest/project[@merge-aosp="true"]/@path' $sni
 if hash xg >/dev/null 2>/dev/null; then
     while read path; do
         pushd $path
-        git push XOS HEAD:$xos_revision  || (
+        git push xos HEAD:$xos_revision  || (
             echo -e "\e[1;91mAn error occured during dpush, please review the error.\e[0m";
             echo "If you think this isn't a problem, press ENTER to continue, otherwise CTRL+C";
             read

@@ -31,6 +31,7 @@ while read path; do
   repo_path="$path"
   repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
   repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
+  repo_xos="ssh://git@git.halogenos.org/halogenOS/$repo_name"
   echo "Upstream: $repo_upstream"
   repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
   echo "Upstream revision: $repo_upstream_rev"
@@ -47,6 +48,13 @@ while read path; do
     git remote set-url upstream $repo_upstream
   fi
 
+  echo "Setting XOS remote"
+  if ! git ls-remote xos >/dev/null 2>/dev/null; then
+      git remote add xos $repo_xos || git remote set-url xos $repo_xos
+  else
+      git remote set-url xos $repo_xos
+  fi
+
   if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
     echo "Shallow repository detected, unshallowing first"
     git fetch --unshallow $repo_remote
@@ -57,7 +65,7 @@ while read path; do
   echo "Merging upstream"
   git merge upstream/$repo_upstream_rev
 
-  git push XOS HEAD:$xos_revision
+  git push xos HEAD:$xos_revision
   popd
 
   echo
