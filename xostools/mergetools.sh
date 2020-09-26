@@ -12,3 +12,7 @@ createSnapshot() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/create_snapshot.sh" $@
 }
 
+pushAll() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/push_all.sh" $@
+}
+
