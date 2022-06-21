@@ -71,6 +71,24 @@ function echoen() {
 # Import help functions
 source $(gettop)/external/xos/xostools/xostoolshelp.sh
 
+# Build emulator SDK addon
+function buildemu() {
+    cleanarg=""
+    device="$1"
+    if [ -z "$device" ]; then
+        echo "Missing device, please specify"
+	return
+    fi
+    if [ "$2" == "noclean" ]; then
+      cleanarg="noclean"
+    fi
+
+    echo "Starting ROM build"
+    build full $device $cleanarg
+    echo "Starting SDK addon build"
+    build module $device sdk_addon noclean
+}
+
 # Build function
 function build() {
     buildarg="$1"
