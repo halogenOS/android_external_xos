@@ -81,7 +81,7 @@ function buildemu() {
     fi
     if [ "$2" = "noclean" ]; then
       cleanarg="noclean"
-      echo "Clean enabled"
+      echo "noclean enabled, skipping clean."
     fi
 
     echo "Starting ROM build"
