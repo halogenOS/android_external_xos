@@ -79,8 +79,9 @@ function buildemu() {
         echo "Missing device, please specify"
 	return
     fi
-    if [ "$2" == "noclean" ]; then
+    if [ "$2" = "noclean" ]; then
       cleanarg="noclean"
+      echo "Clean enabled"
     fi
 
     echo "Starting ROM build"
