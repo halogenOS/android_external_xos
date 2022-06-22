@@ -5,6 +5,7 @@ set -e
 cd "$TOP"
 
 snippet="$TOP/.repo/manifests/snippets/XOS.xml"
+aosp_snippet="$TOP/.repo/manifests/default.xml"
 
 if [[ "$2" == "-"* ]]; then
     echo "Specify positional arguments after options, for example --no-reset android-9.0.0_r45"
@@ -34,9 +35,8 @@ revision="$1"
 
 while read -r path; do
     echo "$path"
-    repo_name=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" $snippet)
-    repo_name_aosp=$(echo "$repo_name" | sed -e "s/android_//" -e "s/^build_make$/build/" -e "s/_/\//g" -e 's/PermissionController/PackageInstaller/')
-    repo_aosp="https://android.googlesource.com/platform/$repo_name_aosp"
+    repo_name_aosp=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" $aosp_snippet)
+    repo_aosp="$(xmlstarlet sel -t -v "/manifest/remote[@name='aosp']/@fetch" $aosp_snippet)/$repo_name_aosp"
     echo "AOSP remote: $repo_aosp"
     echo "Revision to merge: $revision"
     repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" "$snippet")
