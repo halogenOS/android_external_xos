@@ -84,10 +84,7 @@ function buildemu() {
       echo "noclean enabled, skipping clean."
     fi
 
-    echo "Starting ROM build"
-    build full $device $cleanarg
-    echo "Starting SDK addon build"
-    build module $device sdk_addon noclean
+    build module $device sdk_addon $cleanarg
 }
 
 # Build function
