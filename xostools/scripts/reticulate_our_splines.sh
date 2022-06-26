@@ -2,9 +2,11 @@
 
 set -e
 
-pushd $TOP
+pushd "$TOP"
+export ANDROID_BUILD_TOP="$TOP"
 
 source build/envsetup.sh
+source external/xos/xostools/includes.sh
 
 if [ -z "$ROM_REVISION" ]; then
   ROM_REVISION="$ROM_VERSION"
@@ -76,17 +78,24 @@ for path in ${list[@]}; do
 
   echo "Setting upstream remote"
   git remote add upstream $repo_upstream || git remote set-url upstream $repo_upstream
+  echo "Fetching upstream"
+  git fetch upstream
+  echo "Fetching XOS"
+  git fetch XOS || :
 
   if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
     echo "Shallow repository detected, unshallowing first"
     git fetch --unshallow
   fi
 
-  echo "Fetching upstream"
-  git fetch upstream
   echo "Checking out $repo_upstream_rev -> $short_revision"
   git checkout upstream/$repo_upstream_rev -B $short_revision
   $has_createxos && echo "Creating repository (if it doesn't exist)" && createXos || :
+
+  if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
+    echo "Shallow branch detected, unshallowing first"
+    git fetch --unshallow
+  fi
 
   if [[ ${FORCE_PUSHES} == true ]]; then
     git push XOS HEAD:$ROM_REVISION -f
