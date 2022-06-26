@@ -472,4 +472,16 @@ function reticulateOurSplines() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/reticulate_our_splines.sh" $@
 }
 
+function addXos() {
+  git remote remove xos
+  git remote add xos git@git.halogenos.org:halogenOS/$(getUnderscorePath)
+  git fetch xos
+}
+
+function addXosGithub() {
+  git remote remove xosgh
+  git remote add xosgh git@github.com:halogenOS/$(getUnderscorePath)
+  git fetch xosgh
+}
+
 return 0

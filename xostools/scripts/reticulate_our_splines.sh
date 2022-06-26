@@ -6,6 +6,7 @@ pushd "$TOP"
 export ANDROID_BUILD_TOP="$TOP"
 
 source build/envsetup.sh
+source external/xos/xostools/disable_git_prompts.sh
 source external/xos/xostools/includes.sh
 
 if [ -z "$ROM_REVISION" ]; then

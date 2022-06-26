@@ -1,9 +1,5 @@
 #!/bin/bash
 
-export GIT_TERMINAL_PROMPT=0
-export GIT_ASKPASS=false
-export GCM_INTERACTIVE=never
-
 export ROM_REVISION="XOS-12.1"
 
 function getPlatformPath() {
@@ -33,4 +29,40 @@ createXos() {
     -H "Authorization: Bearer $(<"$HOME/.creds/xos_gitlab_token")" \
     -X POST \
     "https://git.halogenos.org/api/v4/projects?name=$project_to_create&namespace_id=108"
+}
+
+function addXos() {
+  if git ls-remote xos >/dev/null 2>/dev/null; then
+    git remote set-url xos git@git.halogenos.org:halogenOS/$(getUnderscorePath)
+  else
+    git remote add xos git@git.halogenos.org:halogenOS/$(getUnderscorePath)
+  fi
+  git fetch xos
+}
+
+function addXosGithub() {
+  if git ls-remote xosgh >/dev/null 2>/dev/null; then
+    git remote set-url xosgh git@github.com:halogenOS/$(getUnderscorePath)
+  else
+    git remote add xosgh git@github.com:halogenOS/$(getUnderscorePath)
+  fi
+  git fetch xosgh
+}
+
+function addAosp() {
+  git remote remove aosp 2>/dev/null
+  git remote add aosp https://android.googlesource.com/platform/$(getPlatformPath).git
+  git fetch aosp
+}
+
+function addLOS() {
+  git remote remove los 2>/dev/null
+  local remote_domain="github.com"
+  if [ $# -ge 1 ]; then
+	  remote_domain="$1"
+  fi
+  local usp=$(getUnderscorePath)
+  usp=${usp/build_make/build}
+  git remote add los https://$remote_domain/LineageOS/${usp}.git
+  git fetch los
 }
