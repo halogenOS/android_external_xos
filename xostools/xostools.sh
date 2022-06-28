@@ -484,4 +484,8 @@ function addXosGithub() {
   git fetch xosgh
 }
 
+filterSubdirectory() {
+  FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --subdirectory-filter $1 $2 -- --all
+}
+
 return 0
