@@ -12,6 +12,7 @@ if [ "$1" != "--no-reset" ]; then
   echo
 fi
 
+export ANDROID_BUILD_TOP="$TOP"
 pushd $TOP
 
 source build/envsetup.sh

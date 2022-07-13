@@ -12,6 +12,8 @@ if [[ "$2" == "--"* ]]; then
 fi
 
 source build/envsetup.sh
+source external/xos/xostools/disable_git_prompts.sh
+source external/xos/xostools/includes.sh
 
 if [ "$1" != "--no-reset" ]; then
     echo "Warning: This will perform a reporeset and a reposync to make sure everything is up to date before doing the merges"

@@ -3,6 +3,7 @@
 set -e
 
 cd "$TOP"
+export ANDROID_BUILD_TOP="$TOP"
 
 snippet="$TOP/.repo/manifests/snippets/XOS.xml"
 aosp_snippet="$TOP/.repo/manifests/default.xml"
