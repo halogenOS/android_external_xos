@@ -13,7 +13,9 @@ if [[ "$2" == "-"* ]]; then
     exit 2
 fi
 
-source "build/envsetup.sh"
+source build/envsetup.sh
+source external/xos/xostools/disable_git_prompts.sh
+source external/xos/xostools/includes.sh
 
 if [ "$1" != "--no-reset" ]; then
     echo "Warning: This will perform a reporeset and a reposync to make sure everything is up to date before doing the merges"
@@ -33,10 +35,10 @@ if [ -z "$1" ]; then
 fi
 
 revision="$1"
-
-while read -r path; do
+typeset -a list=( $(xmlstarlet sel -t -v '/manifest/project[@merge-aosp="true"]/@path' "$snippet" && echo) )
+for path in ${list[@]}; do
     echo "$path"
-    repo_name_aosp=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" $aosp_snippet)
+    repo_name_aosp=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" $aosp_snippet || echo "platform/$path")
     repo_aosp="$(xmlstarlet sel -t -v "/manifest/remote[@name='aosp']/@fetch" $aosp_snippet)/$repo_name_aosp"
     echo "AOSP remote: $repo_aosp"
     echo "Revision to merge: $revision"
@@ -67,13 +69,13 @@ while read -r path; do
 
     echo
     popd
-done < <(xmlstarlet sel -t -v '/manifest/project[@merge-aosp="true"]/@path' "$snippet" && echo)
+done
 
-while read -r path; do
+for path in ${list[@]}; do
     pushd "$path"
     git push XOS HEAD:$ROM_VERSION
     popd
-done < <(xmlstarlet sel -t -v '/manifest/project[@merge-aosp="true"]/@path' "$snippet" && echo)
+done
 
 echo "Everything done."
 
