@@ -505,4 +505,11 @@ pickrange () {
 	done | xargs git cherry-pick -s
 }
 
+mirrorThisRepo() {
+  addXos || :
+  addXosGithub || :
+  git branch -r --list 'xos/*' | awk '{ print $1 }' | cut -d '/' -f2- | xargs -i git push xosgh 'xos/{}:refs/heads/{}' || :
+  git tag --list | grep -E '^XOS-[0-9]+?[.][0-9]+?-.*' | xargs -i git push xosgh '{}' || :
+}
+
 return 0
