@@ -42,7 +42,8 @@ while read path; do
 
     addXos || :
     addXosGithub || :
-    git branch -r --list 'xos/*' | awk '{ print $1 }' | cut -d '/' -f2 | xargs -i git push -f xosgh 'xos/{}:refs/heads/{}' || :
+    git branch -r --list 'xos/*' | awk '{ print $1 }' | cut -d '/' -f2- | xargs -i git push xosgh 'xos/{}:refs/heads/{}' || :
+    git tag --list | grep -E '^XOS-[0-9]+?[.][0-9]+?-.*' | xargs -i git push xosgh '{}' || :
 
     echo
     popd
