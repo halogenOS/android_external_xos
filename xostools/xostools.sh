@@ -28,6 +28,12 @@ THREAD_COUNT_BUILD=${THREAD_COUNT_BUILD:=$(($CPU_COUNT + 2))}
 # Use doubled CPU count to sync (auto)
 THREAD_COUNT_N_BUILD=$(($CPU_COUNT + 2))
 
+if [[ $THREAD_COUNT_BUILD == "auto" ]]; then
+  THREAD_COUNT_BUILD_ARG=""
+else
+  THREAD_COUNT_BUILD_ARG="-j$THREAD_COUNT_BUILD"
+fi
+
 # Save the current directory before continuing the script.
 # The working directory might change during the execution of specific
 # functions, which should be set back to the beginning directory
@@ -117,18 +123,18 @@ function build() {
                 # Of course let's check the kitchen
                 lunch $target
                 # Clean if desired
-                [[ "$cleanarg" == "noclean" ]] || make clean
+                [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
                 echo "Using $THREAD_COUNT_BUILD threads for build."
                 if [ "$buildarg" != "mm" ]; then
                     if [[ "$target" == *"sdk_phone_"* ]]; then
-			echob "Building for SDK phone"
-			[ "${module}" = "bacon" ] && module=''
-		    fi
-                    make --skip-soong-tests -j$THREAD_COUNT_BUILD $module
+          echob "Building for SDK phone"
+          [ "${module}" = "bacon" ] && module=''
+            fi
+                    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module
                     return $?
                 else
-                    mmma --skip-soong-tests -j$THREAD_COUNT_BUILD $module
+                    mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module
                     return $?
                 fi
             ;;
@@ -138,7 +144,7 @@ function build() {
                 echob "Starting batch build..."
                 shift
                 ALL_MODULES_TO_BUILD="$@"
-                [[ "$@" == *"noclean"* ]] || make clean
+                [[ "$@" == *"noclean"* ]] || m clean
                 for module in $ALL_MODULES_TO_BUILD; do
                     [[ "$module" == "noclean" ]] && continue
                     echo
