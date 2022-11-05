@@ -22,7 +22,11 @@ fi
 echo "Generating temporary manifest file"
 repo manifest > full-manifest.xml
 echo "Generating repository list"
-typeset -a list=( $(xmlstarlet sel -t -v '/manifest/project[@upstream]/@path' full-manifest.xml) )
+if [ -z "$1" ]; then
+  typeset -a list=( $(xmlstarlet sel -t -v '/manifest/project[@upstream]/@path' full-manifest.xml) )
+else
+  typeset -a list=( $1 )
+fi
 
 for path in ${list[@]}; do
   echo
