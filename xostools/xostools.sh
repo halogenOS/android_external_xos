@@ -400,63 +400,6 @@ EOF
   unset repomanifest
 }
 
-# Completely cleans everything and deletes all untracked files
-# Deprecated.
-function reposterilize() {
-  echo -e '\033[1mNote: This function is deprecated.' \
-           'It might end up getting removed in the future.' \
-           '\nUse reporeset instead.\033[0m'
-  if [[ "$(pwd)" == "$(realpath ~)" ]]; then
-    echo "Aborted because you are in your home dir"
-    return 1
-  elif [[ "$(gettop)" == "" ]]; then
-    echo "Aborted, top is not set"
-    return 1
-  fi
-  echo "Warning: Any unsaved work will be gone! Press CTRL+C to abort."
-  for i in {5..0}; do
-    echo -en "\r\033[K\rStarting sterilization in $i seconds"
-    sleep 1
-  done
-  local startdir="$(gettop)"
-  echo
-  set +e
-  while read dir; do
-    cd $startdir
-    if [[ "$dir" == *"${startdir}/.repo/"* ]]; then continue; fi
-    cd "$dir/../"
-    nogitdir="$(realpath $dir/..)"
-    reladir="${nogitdir/$startdir\//}"
-    echo " - $reladir"
-    if [[ "$reladir" == "hardware/"* ]]; then
-      echo "  This is a hardware repository. Only resetting."
-      git reset
-      git reset --hard
-      git clean -fd
-      continue
-    fi
-    if [[ "$reladir" == "prebuilts/"* ]]; then
-      echo "  This is a prebuilts repository. Only resetting."
-      git reset
-      git reset --hard
-      git clean -fd
-      continue
-    fi
-    git revert --abort 2>/dev/null
-    git rebase --abort 2>/dev/null
-    git cherry-pick --abort 2>/dev/null
-    git reset 2>/dev/null
-    git reset --hard XOS/${ROM_REVISION} 2>/dev/null \
- || git reset --hard github/${ROM_REVISION} 2>/dev/null \
- || git reset --hard 2>/dev/null
-    git clean -fd
-  done < <(find "$startdir/" -name ".git" -type d)
-  cd "$startdir"
-  unset startdir
-  set -e
-  return 0
-}
-
 function resetmanifest() {
   cd $(gettop)/.repo/manifests
   git fetch origin ${ROM_REVISION} 2>&1 >/dev/null
