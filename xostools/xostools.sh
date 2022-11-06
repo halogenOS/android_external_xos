@@ -482,17 +482,7 @@ function addUpstreamRemotes() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/add_upstream_remotes.sh" $@
 }
 
-function addXos() {
-  git remote remove xos
-  git remote add xos git@git.halogenos.org:halogenOS/$(getUnderscorePath)
-  git fetch xos
-}
-
-function addXosGithub() {
-  git remote remove xosgh
-  git remote add xosgh git@github.com:halogenOS/$(getUnderscorePath)
-  git fetch xosgh
-}
+source $(gettop)/external/xos/xostools/includes.sh
 
 function addOther() {
 	git remote remove $1
