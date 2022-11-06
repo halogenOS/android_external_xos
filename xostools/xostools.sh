@@ -508,4 +508,8 @@ mirrorThisRepo() {
   git tag --list | grep -E '^XOS-[0-9]+?[.][0-9]+?-.*' | xargs -i git push xosgh '{}' || :
 }
 
+filterbranch() {
+    FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --subdirectory-filter $1 $2 -- --all
+}
+
 return 0
