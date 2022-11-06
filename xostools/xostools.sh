@@ -455,4 +455,6 @@ filterbranch() {
     FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --subdirectory-filter $1 $2 -- --all
 }
 
+alias gpick="git cherry-pick -s"
+
 return 0
