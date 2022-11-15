@@ -120,8 +120,12 @@ function build() {
                 echob "Starting build..."
                 [ -z "$module" ] && module="bacon" || \
                     echo "You have decided to build $module"
-                # Of course let's check the kitchen
-                lunch $target
+                if [[ "$target" != *"sdk_phone_"* ]] && ! check_product $target; then
+                    target_device="$(echo "$target" | sed -re 's/^[a-z]+_([A-Za-z0-9]+).*$/\1/g')"
+                    echo "Device trees for $target not available, trying to breakfast $target_device"
+                    breakfast "$target_device"
+                fi
+                lunch $target || (breakfast $target && lunch $target) || return 1
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
