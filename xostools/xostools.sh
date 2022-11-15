@@ -132,9 +132,9 @@ function build() {
                 echo "Using $THREAD_COUNT_BUILD threads for build."
                 if [ "$buildarg" != "mm" ]; then
                     if [[ "$target" == *"sdk_phone_"* ]]; then
-          echob "Building for SDK phone"
-          [ "${module}" = "bacon" ] && module=''
-            fi
+                        echob "Building for SDK phone"
+                        [ "${module}" = "bacon" ] && module=''
+                    fi
                     m --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module
                     return $?
                 else
