@@ -37,6 +37,13 @@ for path in ${list[@]}; do
   repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
   echo "Upstream: $repo_upstream"
   repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
+  repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
+  is_tag=false
+  if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
+    echo "Using tag as upstream"
+    is_tag=true
+    repo_upstream_rev="$repo_upstream_third"
+  fi
   echo "Upstream revision: $repo_upstream_rev"
   repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" full-manifest.xml || :)
   echo "Remote: $repo_remote"
@@ -94,7 +101,11 @@ for path in ${list[@]}; do
   fi
 
   echo "Checking out $repo_upstream_rev -> $short_revision"
-  git checkout upstream/$repo_upstream_rev -B $short_revision
+  if $is_tag; then
+    git checkout $repo_upstream_rev -B $short_revision
+  else
+    git checkout upstream/$repo_upstream_rev -B $short_revision
+  fi
   $has_createxos && echo "Creating repository (if it doesn't exist)" && createXos || :
 
   if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
