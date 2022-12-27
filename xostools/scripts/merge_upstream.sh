@@ -32,6 +32,13 @@ while read path; do
   repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
   echo "Upstream: $repo_upstream"
   repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
+  repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
+  is_tag=false
+  if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
+    echo "Using tag as upstream"
+    is_tag=true
+    repo_upstream_rev="$repo_upstream_third"
+  fi
   echo "Upstream revision: $repo_upstream_rev"
   repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" full-manifest.xml)
 
@@ -58,7 +65,12 @@ while read path; do
   echo "Fetching upstream"
   git fetch upstream
   echo "Merging upstream"
-  git merge upstream/$repo_upstream_rev
+  # Check if it is a tag
+  if $is_tag; then
+    git merge $repo_upstream_rev
+  else
+    git merge upstream/$repo_upstream_rev
+  fi
 
   git push XOS HEAD:$ROM_VERSION
   popd
