@@ -461,4 +461,9 @@ filterbranch() {
 
 alias gpick="git cherry-pick -s"
 
+if [ -f "$(gettop)/ccache.sh" ]; then
+    echo "Including ccache.sh"
+    source "$(gettop)/ccache.sh"
+fi
+
 return 0
