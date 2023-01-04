@@ -12,7 +12,7 @@ function getPlatformPath() {
 
 function getNonPrefixedUnderscorePath() {
   ppath="$(getPlatformPath)"
-  echo -n "${prefix}${ppath//\//_}"
+  echo -n "${ppath//\//_}"
 }
 
 function getUnderscorePath() {
