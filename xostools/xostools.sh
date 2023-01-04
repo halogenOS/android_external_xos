@@ -449,6 +449,12 @@ function addOtherShort() {
 	git fetch $1
 }
 
+function addOtherCustom() {
+	git remote remove $1
+	git remote add $1 https://github.com/$1/$(getNonPrefixedUnderscorePath $2).git
+	git fetch $1
+}
+
 filterSubdirectory() {
   FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --subdirectory-filter $1 $2 -- --all
 }
