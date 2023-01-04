@@ -451,7 +451,7 @@ function addOtherShort() {
 
 function addOtherCustom() {
 	git remote remove $1
-	git remote add $1 https://github.com/$1/$(getNonPrefixedUnderscorePath $2).git
+	git remote add $1 https://github.com/$1/$(getUnderscorePath $2).git
 	git fetch $1
 }
 
