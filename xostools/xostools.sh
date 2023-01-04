@@ -462,8 +462,11 @@ filterbranch() {
 alias gpick="git cherry-pick -s"
 
 if [ -f "$(gettop)/ccache.sh" ]; then
-    echo "Including ccache.sh"
+    echo "including ccache.sh"
     source "$(gettop)/ccache.sh"
+    if [ -z "$CCACHE_EXEC" ]; then
+        export CCACHE_EXEC="$(which ccache)"
+    fi
 fi
 
 return 0
