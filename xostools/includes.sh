@@ -10,13 +10,17 @@ function getPlatformPath() {
   echo -n "$result_string"
 }
 
+function getNonPrefixedUnderscorePath() {
+  ppath="$(getPlatformPath)"
+  echo -n "${prefix}${ppath//\//_}"
+}
+
 function getUnderscorePath() {
   local prefix="android"
-  ppath="$(getPlatformPath)"
   if [ $# -ge 1 ]; then
     local prefix="$1"
   fi
-  echo -n "${prefix}${ppath//\//_}"
+  echo -n "${prefix}$(getNonPrefixedUnderscorePath)"
 }
 
 createXos() {

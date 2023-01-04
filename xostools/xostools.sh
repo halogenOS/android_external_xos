@@ -437,6 +437,18 @@ function addOther() {
 	git fetch $1
 }
 
+function addOtherPlatform() {
+	git remote remove $1
+	git remote add $1 https://github.com/$1/$(getUnderscorePath platform).git
+	git fetch $1
+}
+
+function addOtherShort() {
+	git remote remove $1
+	git remote add $1 https://github.com/$1/$(getNonPrefixedUnderscorePath).git
+	git fetch $1
+}
+
 filterSubdirectory() {
   FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch --subdirectory-filter $1 $2 -- --all
 }
