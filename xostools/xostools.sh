@@ -445,7 +445,7 @@ function addOtherPlatform() {
 
 function addOtherShort() {
 	git remote remove $1
-	git remote add $1 https://github.com/$1/$(getNonPrefixedUnderscorePath).git
+	git remote add $1 https://github.com/$1/$(getNonPrefixedUnderscorePath | cut -c2-).git
 	git fetch $1
 }
 
