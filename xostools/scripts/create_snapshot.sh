@@ -52,7 +52,7 @@ while read path; do
 
     echo
     popd
-done < <(xmlstarlet sel -t -v '/manifest/project[remote="XOS"]/@path' $snippet)
+done < <(xmlstarlet sel -t -v '/manifest/project[@remote="XOS"]/@path' $snippet)
 
 echo "Everything done."
 
