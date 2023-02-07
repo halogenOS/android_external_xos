@@ -48,13 +48,11 @@ while read path; do
     fi
 
     git tag "${tag_to_push}"
-    addXos
-    git push xos "${tag_to_push}"
+    git push XOS "${tag_to_push}"
 
     echo
     popd
-done < <(xmlstarlet sel -t -v '/manifest/project[@merge-aosp="true"]/@path' $snippet)
-
+done < <(xmlstarlet sel -t -v '/manifest/project[remote="XOS"]/@path' $snippet)
 
 echo "Everything done."
 
