@@ -73,7 +73,7 @@ done
 
 for path in ${list[@]}; do
     pushd "$path"
-    git push XOS HEAD:$ROM_VERSION
+    git push XOS HEAD:$ROM_VERSION $SCRIPT_PUSH_ARGS
     popd
 done
 
