@@ -20,6 +20,10 @@ listRepoTags() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/list_repo_tags.sh" $@
 }
 
+findMergeCommit() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/find_merge_commit.sh" $@
+}
+
 mirrorAll() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
 }
