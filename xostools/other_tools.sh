@@ -16,6 +16,10 @@ restoreRepoSnapshot() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/restore_repo_snapshot.sh" $@
 }
 
+listRepoTags() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/list_repo_tags.sh" $@
+}
+
 mirrorAll() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
 }
