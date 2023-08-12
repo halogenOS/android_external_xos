@@ -8,6 +8,7 @@ snippet="$TOP/.repo/manifests/snippets/XOS.xml"
 
 if [[ "$1" == "--help" ]]; then
     echo "<dir> <substring>"
+    echo "Tip: omitting the substring will revert to before the latest merge, irrespective of what it is"
     exit 0
 fi
 

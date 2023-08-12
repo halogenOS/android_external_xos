@@ -10,6 +10,7 @@ snippet="$TOP/.repo/manifests/snippets/XOS.xml"
 
 if [[ "$1" == "--help" ]]; then
     echo "<substring>"
+    echo "Tip: omitting the substring will revert to before the latest merge, irrespective of what it is"
     exit 0
 fi
 
@@ -19,20 +20,20 @@ cd $TOP
 
 REMOTE_NAME="XOS"
 
+repos_reset=""
+
 limit_string_with_ellipsis() { local s="$1" m="$2"; echo "${s:0:$m}"$([ "${#s}" -gt "$m" ] && echo "..."); }
 repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$REMOTE_NAME']/@revision" $snippet | sed -re 's/^refs\/heads\/(.*)$/\1/')
 
 while read path; do
-    pushd $path
+    pushd $path >/dev/null
+    echo "$path"
 
     if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
-        echo "Shallow repository detected, unshallowing first"
-        git fetch --unshallow
-    else
-        git fetch "$REMOTE_NAME"
+        echo "Skipping shallow repository $path"
+        popd >/dev/null
+        continue
     fi
-
-    echo
 
     commit_hash=$(git log --grep="$SEARCH_STRING" --merges --pretty=format:'%H' -n 1)
 
@@ -68,12 +69,20 @@ while read path; do
     echo -e "Resetting \033[97;1m$path\033[0m to \033[97m$ours_commit_hash\033[0m \033[90m($ours_commit_message, $ours_author_and_email)\033[0m, before \033[97m$commit_message\033[0m \033[90m($commit_hash)\033[0m"
     git reset --hard $ours_commit_hash
 
+    old_commit_message=$(limit_string_with_ellipsis "$(git log -1 --pretty=format:'%s' $commit_hash)" 72)
+    repos_reset="$repos_reset\n\033[1m$path\033[0m: $old_commit_message -> $ours_commit_message"
+
     echo
     popd >/dev/null
+    echo
 done < <(xmlstarlet sel -t -v "/manifest/project[@remote='$REMOTE_NAME']/@path" $snippet)
 
-echo "Waiting 5 seconds before pushing"
-sleep 5
+echo "Summary:"
+echo -e "$repos_reset"
+echo
+
+echo "Confirm with ENTER to push everything"
+read
 
 while read path; do
     pushd "$path"
