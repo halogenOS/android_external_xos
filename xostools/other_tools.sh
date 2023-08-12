@@ -24,6 +24,14 @@ findMergeCommit() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/find_merge_commit.sh" $@
 }
 
+resetToBeforeMerge() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/reset_to_before_merge.sh" $@
+}
+
+resetAllToBeforeMerge() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/reset_all_to_before_merge.sh" $@
+}
+
 mirrorAll() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
 }
