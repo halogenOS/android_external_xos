@@ -86,6 +86,6 @@ read
 
 while read path; do
     pushd "$path"
-    git push "$REMOTE_NAME" HEAD:$ROM_VERSION $SCRIPT_PUSH_ARGS
+    git push "$REMOTE_NAME" HEAD:$ROM_VERSION -f
     popd
 done < <(xmlstarlet sel -t -v "/manifest/project[@remote='$REMOTE_NAME']/@path" $snippet)
