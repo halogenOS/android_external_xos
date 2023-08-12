@@ -14,6 +14,7 @@ fi
 if [[ "$1" == "--help" ]]; then
     echo "Optional: First non-flag argument is tag"
     echo "Optional: Specify env var tag_to_push_suffix"
+    exit 0
 fi
 
 source build/envsetup.sh
@@ -30,9 +31,10 @@ else
     shift
 fi
 
+REMOTE_NAME="XOS"
 cd $TOP
 
-repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='XOS']/@revision" $snippet | sed -re 's/^refs\/heads\/(.*)$/\1/')
+repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$REMOTE_NAME']/@revision" $snippet | sed -re 's/^refs\/heads\/(.*)$/\1/')
 # provide suffix in env
 tag_to_push="${repo_revision}-$(date '+%Y%m%d_%H%M%S_%Z_%s')${tag_to_push_suffix}"
 if [ ! -z "$1" ]; then
@@ -47,12 +49,12 @@ while read path; do
         git fetch --unshallow
     fi
 
-    git tag "${tag_to_push}"
-    git push XOS "${tag_to_push}"
+    git tag "${tag_to_push}" $GIT_TAG_EXTRA_ARGS
+    git push "$REMOTE_NAME" "${tag_to_push}"
 
     echo
     popd
-done < <(xmlstarlet sel -t -v '/manifest/project[@remote="XOS"]/@path' $snippet)
+done < <(xmlstarlet sel -t -v "/manifest/project[@remote='$REMOTE_NAME']/@path" $snippet)
 
 echo "Everything done."
 

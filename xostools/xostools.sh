@@ -420,6 +420,7 @@ function pretty_print_product_packages() {
 }
 
 source $(gettop)/external/xos/xostools/mergetools.sh
+source $(gettop)/external/xos/xostools/other_tools.sh
 
 function reticulateOurSplines() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/reticulate_our_splines.sh" $@
