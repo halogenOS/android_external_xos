@@ -7,11 +7,12 @@ cd $TOP
 snippet="$TOP/.repo/manifests/snippets/XOS.xml"
 
 if [[ "$1" == "--help" ]]; then
-    echo "Specify the tag you want to restore to as argument"
+    echo "<dir> <tag>"
     exit 0
 fi
 
-TAG_TO_RESTORE="$1"
+DIR_TO_RESTORE="$1"
+TAG_TO_RESTORE="$2"
 
 source build/envsetup.sh
 
@@ -22,8 +23,11 @@ REMOTE_NAME="XOS"
 repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$REMOTE_NAME']/@revision" $snippet | sed -re 's/^refs\/heads\/(.*)$/\1/')
 
 while read path; do
-    echo "$path"
-    pushd $path
+    pushd $path >/dev/null
+    if [ "$(realpath "$TOP/$DIR_TO_RESTORE")" != "$(realpath "$TOP/$path")"]; then
+        popd >/dev/null
+        continue
+    fi
 
     if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
         echo "Shallow repository detected, unshallowing first"
@@ -42,10 +46,10 @@ while read path; do
     echo "New revision: $(git rev-parse "$TAG_TO_RESTORE")"
     git push "$REMOTE_NAME" "$TAG_TO_RESTORE":"${repo_revision}"
 
+    echo "Successfully restored $REMOTE_NAME/$repo_revision to $TAG_TO_RESTORE"
+
     echo
-    popd
+    popd >/dev/null
+    break
 done < <(xmlstarlet sel -t -v "/manifest/project[@remote='$REMOTE_NAME']/@path" $snippet)
-
-echo "Successfully restored all repos, branch $repo_revision to $TAG_TO_RESTORE"
-
 
