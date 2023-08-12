@@ -8,6 +8,7 @@ snippet="$TOP/.repo/manifests/snippets/XOS.xml"
 
 if [[ "$1" == "--help" ]]; then
     echo "Specify the tag you want to restore to as argument"
+    echo "Tip: usually, any valid ref can be used in place of tag"
     exit 0
 fi
 

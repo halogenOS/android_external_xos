@@ -8,6 +8,7 @@ snippet="$TOP/.repo/manifests/snippets/XOS.xml"
 
 if [[ "$1" == "--help" ]]; then
     echo "<dir> <tag>"
+    echo "Tip: usually, any valid ref can be used in place tag"
     exit 0
 fi
 
