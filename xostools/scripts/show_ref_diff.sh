@@ -58,11 +58,11 @@ for path in $all_paths; do
                 fi
             )
             if [[ "$FROM_REF" == android-* ]] && [[ "$TO_REF" == android-* ]]; then
-                git fetch --no-tags aosp +refs/tags/$FROM_REF:refs/tags/$FROM_REF +refs/tags/$TO_REF:refs/tags/$TO_REF
+                git fetch --no-tags aosp +refs/tags/$FROM_REF:refs/tags/$FROM_REF +refs/tags/$TO_REF:refs/tags/$TO_REF || :
             elif [[ "$FROM_REF" == android-* ]]; then
-                git fetch --no-tags aosp +refs/tags/$FROM_REF:refs/tags/$FROM_REF
+                git fetch --no-tags aosp +refs/tags/$FROM_REF:refs/tags/$FROM_REF || :
             elif [[ "$TO_REF" == android-* ]]; then
-                git fetch --no-tags aosp +/refs/tags$TO_REF:refs/tags/$TO_REF
+                git fetch --no-tags aosp +/refs/tags$TO_REF:refs/tags/$TO_REF || :
             fi
             from_commit_hash=$(git rev-parse --verify $FROM_REF >/dev/null 2>&1 && git rev-parse $FROM_REF || echo "")
             to_commit_hash=$(git rev-parse --verify $TO_REF >/dev/null 2>&1 && git rev-parse $TO_REF || echo "")
