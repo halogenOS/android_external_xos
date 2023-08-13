@@ -24,7 +24,10 @@ limit_string_with_ellipsis() { local s="$1" m="$2"; echo "${s:0:$m}"$([ "${#s}" 
 repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$REMOTE_NAME']/@revision" $snippet | sed -re 's/^refs\/heads\/(.*)$/\1/')
 
 while read path; do
-    pushd $path >/dev/null
+    if [ ! -d "$path" ]; then
+        continue
+    fi
+    pushd "$path" >/dev/null
 
     if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
         popd >/dev/null
@@ -66,7 +69,10 @@ while read path; do
         echo -e "\033[32m$short_hash\033[0m: \033[1m$subject\033[0m \033[90m($author_email)\033[0m"
     done
 
+    if $did_start; then
+        echo
+    fi
+
     popd >/dev/null
-    echo
 done < <(xmlstarlet sel -t -v "/manifest/project[@remote='$REMOTE_NAME']/@path" $snippet)
 

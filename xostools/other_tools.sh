@@ -36,6 +36,10 @@ showMergeDetails() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/show_merge_details.sh" $@
 }
 
+showRefDiff() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/show_ref_diff.sh" $@
+}
+
 mirrorAll() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
 }
