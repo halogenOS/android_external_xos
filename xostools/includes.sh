@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export ROM_REVISION="XOS-13.0"
+export ROM_REVISION="XOS-14.0"
 
 function getPlatformPath() {
   PWD="$(pwd)"
