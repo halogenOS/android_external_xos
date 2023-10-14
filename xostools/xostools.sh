@@ -22,11 +22,8 @@ echo -e "\033[0mincluding \033[1m\033[38;5;39mXOS\033[0m\033[1m Tools\033[0m"
 # or your physical core count when not using Hyperthreading
 # Here the virtual cores are always counted, which can be the same as
 # physical cores if not using Hyperthreading or a similar feature.
-CPU_COUNT=$(nproc --all)
-# Use 2 times the CPU count to build
-THREAD_COUNT_BUILD=${THREAD_COUNT_BUILD:=$(($CPU_COUNT + 2))}
-# Use doubled CPU count to sync (auto)
-THREAD_COUNT_N_BUILD=$(($CPU_COUNT + 2))
+CPU_COUNT=$(grep -E '^processor\W' < /proc/cpuinfo | wc -l)
+THREAD_COUNT_BUILD=${THREAD_COUNT_BUILD:=$CPU_COUNT}
 
 if [[ $THREAD_COUNT_BUILD == "auto" ]]; then
   THREAD_COUNT_BUILD_ARG=""
@@ -169,52 +166,8 @@ function build() {
     return 0
 }
 
-# Reposync!! Laziness is taking over.
-# Sync with special features and traditional repo.
 function reposync() {
-    # You have slow internet? You don't want to consume the whole bandwidth?
-    # Same variable definition stuff as always
-    REPO_ARG="$1"
-    PATH_ARG="$2"
-    QUIET_ARG=""
-    THREADS_REPO=$THREAD_COUNT_N_BUILD
-    # Automatic!
-    [ -z "$REPO_ARG" ] && REPO_ARG="auto"
-    # Let's decide how much threads to use
-    # Self-explanatory.
-    case $REPO_ARG in
-        turbo)      THREADS_REPO=$(($CPU_COUNT * 10));;
-        faster)     THREADS_REPO=$(($CPU_COUNT * 4)) ;;
-        fast)       THREADS_REPO=$(($CPU_COUNT * 2)) ;;
-        auto)                               ;;
-        slow)       THREADS_REPO=$CPU_COUNT;;
-        slower)     THREADS_REPO=$(echo "scale=1; $CPU_COUNT / 2 + 0.5" | bc | cut -d '.' -f1);; # + 0.5 will round
-        single)     THREADS_REPO=1          ;;
-        easteregg)  THREADS_REPO=384        ;; # Neil's love
-        quiet)      QUIET_ARG="-q"          ;;
-        # People might want to get some good help
-        -h | --help | h | help | man | halp | idk )
-            echo "Usage: reposync <speed> [path]"
-            echo "Available speeds are:"
-            echo -en "  turbo\n  faster\n  fast\n  auto\n  slow\n" \
-                      " slower\n  single\n  easteregg\n\n"
-            echo "Path is not necessary. If not supplied, defaults to workspace."
-            return 0
-        ;;
-        # Oops...
-        *)
-          [[ "$REPO_ARG" == */ ]] && REPO_ARG="echo ${REPO_ARG%?}"
-          [[ -d "$REPO_ARG" || $(repo manifest | grep "$REPO_ARG") ]] && REPO_ARG="auto" && PATH_ARG="$1"
-          [[ -d "$PATH_ARG" ]] || echo "Unknown argument \"$REPO_ARG\" for reposync, Defaulting to workspace." ;;
-    esac
-
-    if [[ "$3" == "quiet" ]]; then
-    QUIET_ARG="-q"
-    fi
-    # Sync!! Use the power of shell scripting!
-    echo "Using $THREADS_REPO threads for sync."
-    repo sync -j$THREADS_REPO $QUIET_ARG --force-sync \
-        -c --no-clone-bundle --no-tags $2 $PATH_ARG
+    repo sync --force-sync -c --no-clone-bundle --no-tags $@
     return $?
 }
 
@@ -301,7 +254,7 @@ function reporesync() {
         repo)
             echob "Resyncing $1..."
             rm -rf $1
-            reposync single $1
+            reposync $1
         ;;
 
         # Help me!
