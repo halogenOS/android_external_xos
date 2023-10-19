@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (C) 2016-2022 The halogenOS Project
+# Copyright (C) 2016-2023 The halogenOS Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
