@@ -73,11 +73,7 @@ while read path; do
   fi
 
   if [ -f .lfsconfig ] || grep -q 'merge=lfs' .gitattributes; then {
-    git lfs fetch
-    git lfs checkout
-    rm -f .gitattributes .lfsconfig
-    git add -A
-    git commit -m "Directly check out LFS"
+    unLFS
   }
 
   git push XOS HEAD:$ROM_VERSION

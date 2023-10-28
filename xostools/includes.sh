@@ -70,3 +70,14 @@ function addLOS() {
   git remote add los https://$remote_domain/LineageOS/${usp}.git
   git fetch los
 }
+
+function unLFS() {
+  git lfs fetch
+  git lfs checkout
+  lfs_files=$(git lfs ls-files | awk '{ print $3 }')
+  echo $lfs_files | xargs -I% git rm --cached
+  rm -f .gitattributes .lfsconfig
+  echo $lfs_files | xargs -I% git add
+  git add -A
+  git commit -m "Directly checkout LFS"
+}
