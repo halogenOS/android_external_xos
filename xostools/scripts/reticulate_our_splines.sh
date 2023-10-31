@@ -114,9 +114,9 @@ for path in ${list[@]}; do
   fi
 
   if [[ ${FORCE_PUSHES} == true ]]; then
-    git push XOS HEAD:$ROM_REVISION -f
+    git push XOS HEAD:$repo_revision -f
   else
-    git push XOS HEAD:$ROM_REVISION
+    git push XOS HEAD:$repo_revision
   fi
 
   popd
