@@ -41,6 +41,14 @@ while read path; do
   fi
   echo "Upstream revision: $repo_upstream_rev"
   repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" full-manifest.xml)
+  echo "Remote: $repo_remote"
+  repo_revision=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@revision" full-manifest.xml || :)
+  if [ -z "$repo_revision" ]; then
+    echo -n "(from remote definition) "
+    repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$repo_remote']/@revision" full-manifest.xml || :)
+  fi
+  short_revision=${repo_revision/refs\/heads\//}
+  echo "Revision: $repo_revision ($short_revision)"
 
   pushd $TOP/$path
 
@@ -76,7 +84,7 @@ while read path; do
     unLFS
   }
 
-  git push XOS HEAD:$ROM_VERSION
+  git push XOS HEAD:$short_revision
   popd
 
   echo

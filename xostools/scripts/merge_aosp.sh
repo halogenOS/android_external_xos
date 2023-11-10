@@ -73,7 +73,15 @@ done
 
 for path in ${list[@]}; do
     pushd "$path"
-    git push XOS HEAD:$ROM_VERSION $SCRIPT_PUSH_ARGS
+    repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" "$snippet")
+    repo_revision=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@revision" "$snippet" || :)
+    if [ -z "$repo_revision" ]; then
+        echo -n "(from remote definition) "
+        repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$repo_remote']/@revision" "$snippet" || :)
+    fi
+    short_revision=${repo_revision/refs\/heads\//}
+    echo "Revision: $repo_revision ($short_revision)"
+    git push XOS HEAD:$short_revision $SCRIPT_PUSH_ARGS
     popd
 done
 
