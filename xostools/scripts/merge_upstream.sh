@@ -52,10 +52,6 @@ while read path; do
 
   pushd $TOP/$path
 
-  if [[ ${short_revision} != $(git branch --show-current) ]]; then
-    repo checkout $short_revision || repo start $short_revision
-  fi
-
   echo "Setting upstream remote"
   if ! git ls-remote upstream >/dev/null 2>/dev/null; then
     if ! git remote add upstream $repo_upstream; then
@@ -68,6 +64,14 @@ while read path; do
   if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
     echo "Shallow repository detected, unshallowing first"
     git fetch --unshallow $repo_remote
+  fi
+
+  if [[ ${short_revision} != $(git branch --show-current) ]]; then
+    git checkout $short_revision || (
+      git fetch $repo_remote
+      git checkout $repo_remote/$short_revision -b $short_revision
+      git branch -u $repo_remote/$short_revision
+    )
   fi
 
   echo "Fetching upstream"
