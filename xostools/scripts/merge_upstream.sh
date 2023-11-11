@@ -80,7 +80,7 @@ while read path; do
     git merge upstream/$repo_upstream_rev
   fi
 
-  if [ -f .lfsconfig ] || grep -q 'merge=lfs' .gitattributes; then
+  if [ -f .lfsconfig ] || ( [ -f .gitattributes ] && grep -q 'merge=lfs' .gitattributes ); then
     unLFS
   fi
 
