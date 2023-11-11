@@ -52,8 +52,8 @@ while read path; do
 
   pushd $TOP/$path
 
-  if [[ ${ROM_VERSION} != $(git branch --show-current) ]]; then
-    repo checkout $ROM_VERSION || repo start $ROM_VERSION
+  if [[ ${short_revision} != $(git branch --show-current) ]]; then
+    repo checkout $short_revision || repo start $short_revision
   fi
 
   echo "Setting upstream remote"
