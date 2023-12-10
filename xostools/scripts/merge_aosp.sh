@@ -43,11 +43,23 @@ for path in ${list[@]}; do
     echo "AOSP remote: $repo_aosp"
     echo "Revision to merge: $revision"
     repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" "$snippet")
+    repo_revision=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@revision" "$snippet" || :)
+    if [ -z "$repo_revision" ]; then
+        echo -n "(from remote definition) "
+        repo_revision=$(xmlstarlet sel -t -v "/manifest/remote[@name='$repo_remote']/@revision" "$snippet" || :)
+    fi
+    short_revision=${repo_revision/refs\/heads\//}
+    echo "Revision: $repo_revision ($short_revision)"
 
     pushd "$path"
 
-    if [[ ${ROM_VERSION} != $(git branch --show-current) ]]; then
-        repo checkout $ROM_VERSION || repo start $ROM_VERSION
+    if [[ ${short_revision} != $(git branch --show-current) ]]; then
+        git checkout --track $repo_remote/$short_revision || \
+        git checkout $short_revision || (
+            git fetch $repo_remote
+            git checkout $repo_remote/$short_revision -b $short_revision
+            git branch -u $repo_remote/$short_revision
+        )
     fi
 
     echo "Setting aosp remote"
@@ -67,7 +79,7 @@ for path in ${list[@]}; do
     git fetch aosp "$revision"
     git fetch aosp
     echo "Merging aosp"
-    git merge "$revision"
+    git merge --no-edit "$revision"
 
     echo
     popd
