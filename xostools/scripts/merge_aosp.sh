@@ -63,7 +63,8 @@ for path in ${list[@]}; do
     fi
 
     echo "Fetching aosp"
-    git fetch aosp
+    # google servers lalalalalalala missing stuff whatever skibidi toilet
+    git fetch --refetch aosp
     echo "Merging aosp"
     git merge "$revision"
 
