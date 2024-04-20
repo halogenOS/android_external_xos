@@ -33,12 +33,13 @@ while read path; do
   echo "Upstream: $repo_upstream"
   repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
   repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
-  is_tag=false
-  if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
-    echo "Using tag as upstream"
-    is_tag=true
+  is_tag_or_commit=false
+  if ( [ "$repo_upstream_rev" == "tag" ] || [ "$repo_upstream_rev" == "commit" ] ) && [ -n "$repo_upstream_third" ]; then
+    echo "Using tag or commit as upstream"
+    is_tag_or_commit=true
     repo_upstream_rev="$repo_upstream_third"
   fi
+  is_commit=false
   echo "Upstream revision: $repo_upstream_rev"
   repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" full-manifest.xml)
   echo "Remote: $repo_remote"
@@ -78,8 +79,7 @@ while read path; do
   echo "Fetching upstream"
   git fetch upstream
   echo "Merging upstream"
-  # Check if it is a tag
-  if $is_tag; then
+  if $is_tag_or_commit; then
     git merge $repo_upstream_rev
   else
     git merge upstream/$repo_upstream_rev
