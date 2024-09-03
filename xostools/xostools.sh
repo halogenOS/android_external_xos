@@ -71,6 +71,14 @@ function echoen() {
 
 ### BASIC FUNCTIONS END
 
+if ! command -V gettop > /dev/null 2>&1; then
+    function gettop() {
+        # just assume we're a the top. usually this only happens
+	# when we're just getting started
+        pwd
+    }
+fi
+
 # Import help functions
 source $(gettop)/external/xos/xostools/xostoolshelp.sh
 
