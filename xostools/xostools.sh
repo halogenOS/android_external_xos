@@ -99,6 +99,10 @@ function buildemu() {
     build module $device sdk_addon $cleanarg
 }
 
+function buildemu_x86_64() {
+    buildemu aosp_cf_x86_64_phone-trunk_staging-userdebug
+}
+
 # Build function
 function build() {
     buildarg="$1"
