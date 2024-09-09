@@ -17,6 +17,7 @@ let fhs = pkgs.buildFHSUserEnv {
       util-linux
       xmlstarlet
       zip
+      zlib
   ];
   multiPkgs = pkgs: with pkgs; [
   ];
