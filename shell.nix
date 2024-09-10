@@ -13,6 +13,7 @@ let fhs = pkgs.buildFHSUserEnv {
       perl
       pngcrush
       python3
+      rsync
       unzip
       util-linux
       xmlstarlet
