@@ -19,11 +19,17 @@ if ! type createXos >/dev/null 2>/dev/null; then
   has_createxos=false
 fi
 
+snippet="$TOP/.repo/manifests/snippets/XOS.xml"
+aosp_snippet="$TOP/.repo/manifests/default.xml"
+
 echo "Generating temporary manifest file"
 repo manifest > full-manifest.xml
 echo "Generating repository list"
 if [ -z "$1" ]; then
-  typeset -a list=( $(xmlstarlet sel -t -v '/manifest/project[@upstream]/@path' full-manifest.xml) )
+  typeset -a list=(
+    $(xmlstarlet sel -t -v '/manifest/project[@merge-aosp]/@path' "$snippet")
+    $(xmlstarlet sel -t -v '/manifest/project[@upstream]/@path' full-manifest.xml)
+  )
 else
   typeset -a list=( $1 )
 fi
@@ -33,16 +39,34 @@ for path in ${list[@]}; do
   echo "$path"
   repo_path="$path"
   repo_name=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" full-manifest.xml)
-  repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
-  repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
-  echo "Upstream: $repo_upstream"
-  repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
-  repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
-  is_tag=false
-  if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
-    echo "Using tag as upstream"
-    is_tag=true
-    repo_upstream_rev="$repo_upstream_third"
+  merge_aosp=$(xmlstarlet sel -t -v  "/manifest/project[@path='$path']/@merge-aosp" "$snippet" || :)
+  if [[ $merge_aosp == true ]]; then
+    echo "Detected AOSP repo"
+    aosp_path=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@name" "$aosp_snippet" || echo "platform/$path")
+    repo_upstream="https://android.googlesource.com/$aosp_path"
+    repo_upstream_rev=$(
+      (
+        xmlstarlet sel -t -v "/manifest/remote[@name='aosp']/@revision" "$aosp_snippet" || \
+        xmlstarlet sel -t -v "/manifest/default[@remote='aosp']/@revision" "$aosp_snippet"
+      ) | sed -re 's/^refs\/heads\/(.*)$/\1/'
+    )
+    echo "AOSP upstream: $repo_upstream"
+    if [ -z "$repo_upstream_rev" ]; then
+      echo "Unable to determine AOSP upstream revision"
+      exit 1
+    fi
+  else
+    repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
+    repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
+    echo "Upstream: $repo_upstream"
+    repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
+    repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
+    is_tag=false
+    if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
+      echo "Using tag as upstream"
+      is_tag=true
+      repo_upstream_rev="$repo_upstream_third"
+    fi
   fi
   echo "Upstream revision: $repo_upstream_rev"
   repo_remote=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@remote" full-manifest.xml || :)
