@@ -32,7 +32,7 @@ createXos() {
   curl \
     -H "Authorization: Bearer $(<"$HOME/.creds/xos_gitlab_token")" \
     -X POST \
-    "https://git.halogenos.org/api/v4/projects?name=$project_to_create&namespace_id=108"
+    "https://git.halogenos.org/api/v4/projects?name=$project_to_create&namespace_id=108&visibility=public"
 }
 
 function addXos() {
