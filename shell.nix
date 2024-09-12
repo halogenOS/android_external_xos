@@ -7,10 +7,16 @@ let fhs = pkgs.buildFHSUserEnv {
       ccache
       git
       git-repo
+      glibc.dev
       gnumake
       imagemagick
+      libbsd.dev
+      libgcc
+      libxcrypt-legacy
+      ncurses5
       openssl
       perl
+      pkgconf
       pngcrush
       python3
       rsync
