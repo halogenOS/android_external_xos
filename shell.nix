@@ -5,6 +5,7 @@ let fhs = pkgs.buildFHSUserEnv {
   targetPkgs = pkgs: with pkgs; [
       bc
       ccache
+      freetype
       git
       git-repo
       glibc.dev
