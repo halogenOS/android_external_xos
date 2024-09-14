@@ -5,6 +5,7 @@ let fhs = pkgs.buildFHSUserEnv {
   targetPkgs = pkgs: with pkgs; [
       bc
       ccache
+      fontconfig
       freetype
       git
       git-repo
@@ -20,6 +21,7 @@ let fhs = pkgs.buildFHSUserEnv {
       pkgconf
       pngcrush
       python3
+      roboto
       rsync
       unzip
       util-linux
@@ -47,4 +49,5 @@ in pkgs.stdenv.mkDerivation {
   name = "aosp-env-shell";
   nativeBuildInputs = [ fhs ];
   shellHook = "exec aosp-env";
+  FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
 }
