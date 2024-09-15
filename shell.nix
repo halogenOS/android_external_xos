@@ -16,7 +16,7 @@ let fhs = pkgs.buildFHSUserEnv {
       libgcc
       libxcrypt-legacy
       ncurses5
-      openssl
+      openssl openssl.dev
       perl
       pkgconf
       pngcrush
