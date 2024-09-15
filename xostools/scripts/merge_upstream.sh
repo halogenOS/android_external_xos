@@ -76,14 +76,8 @@ while read path; do
     )
   fi
 
-  echo "Fetching upstream"
-  git fetch upstream
   echo "Merging upstream"
-  if $is_tag_or_commit; then
-    git merge $repo_upstream_rev
-  else
-    git merge upstream/$repo_upstream_rev
-  fi
+  git pull $repo_upstream $repo_upstream_rev
 
   if [ -f .lfsconfig ] || ( [ -f .gitattributes ] && grep -q 'merge=lfs' .gitattributes ); then
     unLFS

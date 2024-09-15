@@ -98,8 +98,8 @@ for path in ${list[@]}; do
     git init
   else
     if git ls-remote XOS >/dev/null 2>/dev/null && \
-        git fetch XOS "${repo_revision}"; then
-      echo "Skipping $repo_path, already there"
+        git ls-remote XOS "${repo_revision}" >/dev/null 2>/dev/null; then
+      echob "Skipping $repo_path, already there"
       popd
       continue
     fi
@@ -108,6 +108,13 @@ for path in ${list[@]}; do
   if ! git ls-remote XOS >/dev/null 2>/dev/null; then
     git remote add XOS https://git.halogenos.org/halogenOS/$repo_name ||
       git remote set-url XOS https://git.halogenos.org/halogenOS/$repo_name
+    git remote set-url --push git@git.halogenos.org:halogenOS/$repo_name
+  fi
+
+  if git ls-remote XOS "${repo_revision}" 2>/dev/null; then
+    echob "Skipping $repo_path, ref $repo_revision already exists"
+    popd
+    continue
   fi
 
   git remote set-url --push XOS git@git.halogenos.org:halogenOS/$repo_name
