@@ -77,7 +77,7 @@ while read path; do
   fi
 
   echo "Merging upstream"
-  git pull $repo_upstream $repo_upstream_rev
+  git pull --no-rebase --no-edit $repo_upstream $repo_upstream_rev
 
   if [ -f .lfsconfig ] || ( [ -f .gitattributes ] && grep -q 'merge=lfs' .gitattributes ); then
     unLFS
