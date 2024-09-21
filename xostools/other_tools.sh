@@ -44,3 +44,9 @@ mirrorAll() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
 }
 
+generateMissingKeys() {
+    TOP="$(gettop)" \
+    KEYS_DIR="${KEYS_DIR:=vendor/halogenOS/private/keys}" \
+    bash -i \
+    "$(gettop)/external/xos/xostools/scripts/generate_missing_keys.sh" $@
+}
