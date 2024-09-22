@@ -7,7 +7,7 @@ let fhs = pkgs.buildFHSUserEnv {
       ccache
       fontconfig
       freetype
-      git
+      git git-lfs
       git-repo
       glibc.dev
       gnumake

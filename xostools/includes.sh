@@ -75,9 +75,17 @@ function unLFS() {
   git lfs fetch
   git lfs checkout
   lfs_files=$(git lfs ls-files | awk '{ print $3 }')
-  echo $lfs_files | xargs -I% git rm --cached
+  if [ -n "$lfs_files" ]; then
+    echo $lfs_files | xargs -I% git rm --cached %
+    echo $lfs_files | xargs -I% git lfs untrack %
+  fi
   rm -f .gitattributes .lfsconfig
-  echo $lfs_files | xargs -I% git add
+  git add .gitattributes .lfsconfig
+  git commit -m "Un-LFS"
+  git lfs uninstall
+  if [ -n "$lfs_files" ]; then
+    echo $lfs_files | xargs -I% git add %
+  fi
   git add -A
-  git commit -m "Directly checkout LFS"
+  git commit -m "Directly checkout LFS files"
 }

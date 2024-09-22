@@ -137,6 +137,10 @@ for path in ${list[@]}; do
     git fetch --unshallow
   fi
 
+  if [ -f .lfsconfig ] || ( [ -f .gitattributes ] && grep -q 'merge=lfs' .gitattributes ); then
+    unLFS
+  fi
+
   if [[ ${FORCE_PUSHES} == true ]]; then
     git push XOS HEAD:$repo_revision -f
   else
