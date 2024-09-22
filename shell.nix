@@ -44,7 +44,6 @@ let fhs = pkgs.buildFHSUserEnv {
   ];
   runScript = "zsh";
   profile = ''
-    export ALLOW_NINJA_ENV=true
     export LD_LIBRARY_PATH=/usr/lib:/usr/lib32
   '';
 };
