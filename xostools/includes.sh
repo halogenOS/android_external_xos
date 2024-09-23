@@ -72,6 +72,7 @@ function addLOS() {
 }
 
 function unLFS() {
+  git lfs install || :
   git lfs fetch
   git lfs checkout
   lfs_files=$(git lfs ls-files | awk '{ print $3 }')
