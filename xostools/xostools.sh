@@ -429,10 +429,16 @@ pickrange () {
 }
 
 mirrorThisRepo() {
-  addXos || :
-  addXosGithub || :
-  git branch -r --list 'xos/*' | awk '{ print $1 }' | cut -d '/' -f2- | xargs -i git push xosgh 'xos/{}:refs/heads/{}' || :
-  git tag --list | grep -E '^XOS-[0-9]+?[.][0-9]+?-.*' | xargs -i git push xosgh '{}' || :
+    if [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+        echo "Shallow repository detected, skipping"
+        popd
+        continue
+    fi
+
+    addXos || :
+    addXosGithub || :
+    git branch -r --list 'xos/*' | awk '{ print $1 }' | cut -d '/' -f2- | xargs -i git push xosgh 'xos/{}:refs/heads/{}' || :
+    git tag --list | grep -E '^XOS-[0-9]+?[.][0-9]+?-.*' | xargs -i git push xosgh '{}' || :
 }
 
 filterbranch() {
