@@ -19,7 +19,7 @@ source build/envsetup.sh
 
 if [ "$1" != "--no-reset" ]; then
   reporeset
-  reposync fast
+  reposync
 fi
 
 echo "Generating temporary manifest file"

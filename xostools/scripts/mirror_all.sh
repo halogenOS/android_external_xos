@@ -22,7 +22,7 @@ if [ "$1" != "--no-reset" ]; then
     read
     echo
     reporeset
-    reposync fast
+    reposync
 else
     shift
 fi
