@@ -79,7 +79,11 @@ for path in ${list[@]}; do
     git fetch aosp "$revision"
     git fetch aosp
     echo "Merging aosp"
-    git merge --no-edit "$revision"
+    git merge --no-edit "$revision" || (
+        echo "Automatic merge failed in $path, please fix and commit using git merge --continue"
+        echo "Then run mergeAospUpstream --no-reset $revision"
+        false
+    )
 
     echo
     popd
