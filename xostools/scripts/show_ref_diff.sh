@@ -10,12 +10,13 @@ aosp_snippet="$TOP/.repo/manifests/default.xml"
 
 
 if [[ "$1" == "--help" ]]; then
-    echo "<from> <to>"
+    echo "<from> <to> [<repo>]"
     exit 0
 fi
 
 FROM_REF="$1"
 TO_REF="$2"
+REPO="$3"
 
 cd $TOP
 
@@ -37,6 +38,11 @@ removed_paths=$(
         xmlstarlet sel -t -v "/manifest/remove-project/@path" $remove_snippet
     )
 )
+
+if [ -n "$REPO" ]; then
+    echo "Repo $REPO specified"
+    all_paths="$REPO"
+fi
 
 tmpfile_summary="$(mktemp)"
 tmpfile_diff="$(mktemp)"
