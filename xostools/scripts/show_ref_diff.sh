@@ -5,6 +5,7 @@ set -e
 cd $TOP
 
 snippet="$TOP/.repo/manifests/snippets/XOS.xml"
+remove_snippet="$TOP/.repo/manifests/snippets/remove.xml"
 aosp_snippet="$TOP/.repo/manifests/default.xml"
 
 
@@ -31,10 +32,30 @@ all_paths=$(
     ) | sort -u
 )
 
+removed_paths=$(
+    (
+        xmlstarlet sel -t -v "/manifest/remove-project/@path" $remove_snippet
+    )
+)
+
+tmpfile_summary="$(mktemp)"
+tmpfile_diff="$(mktemp)"
+
 for path in $all_paths; do
     if [ ! -d "$path" ]; then
         continue
     fi
+
+    # If we don't track it and it's removed, skip it
+    if [ -z "$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@path" $snippet 2>/dev/null || :)" ]; then
+        for removed_path in $removed_paths; do
+            if [[ $removed_path == $path ]]; then
+                echo "Skipping removed repository $path"
+                continue 2
+            fi
+        done
+    fi
+
     pushd "$path" >/dev/null
 
     if [ "$(git rev-parse --is-shallow-repository)" == "true" ]; then
@@ -83,6 +104,8 @@ for path in $all_paths; do
         fi
         if ! $did_start; then
             echo -e "\033[1m$path\033[0m"
+            echo "**$path**" | tee -a "$tmpfile_summary" "$tmpfile_diff" >/dev/null
+            echo '```' >> "$tmpfile_summary"
             did_start=true
         fi
         short_hash=$(git log --pretty=format:%h -n 1 $commit)
@@ -92,12 +115,21 @@ for path in $all_paths; do
         author_email=$(limit_string_with_ellipsis "$author <$email>" 48)
 
         echo -e "\033[32m$short_hash\033[0m: \033[1m$subject\033[0m \033[90m($author_email)\033[0m"
+        echo "$short_hash: $subject ($author_email)" >> "$tmpfile_summary"
     done
 
+
     if $did_start; then
-        echo
+        echo '```' >> "$tmpfile_summary"
+        echo '```diff' >> $tmpfile_diff
+        git diff $from_commit_hash $to_commit_hash >> "$tmpfile_diff"
+        echo '```' >> $tmpfile_diff
+        echo | tee -a "$tmpfile_summary" "$tmpfile_diff"
     fi
 
     popd >/dev/null
 done
+
+echo
+echo "Summary has been written to $tmpfile_summary, diff to $tmpfile_diff"
 
