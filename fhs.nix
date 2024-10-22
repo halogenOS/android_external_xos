@@ -28,6 +28,7 @@ pkgs.buildFHSUserEnv {
       xmlstarlet
       zip
       zlib
+      zsh
 
       # misc packages
       payload-dumper-go
