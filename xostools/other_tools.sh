@@ -40,6 +40,10 @@ showRefDiff() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/show_ref_diff.sh" $@
 }
 
+generateRefDiff() {
+    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/generate_ref_diff.sh" $@
+}
+
 mirrorAll() {
     TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
 }
