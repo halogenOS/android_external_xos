@@ -57,15 +57,23 @@ for path in ${list[@]}; do
     fi
   else
     repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
-    repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
-    echo "Upstream: $repo_upstream"
-    repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
-    repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
-    is_tag=false
-    if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
-      echo "Using tag as upstream"
-      is_tag=true
-      repo_upstream_rev="$repo_upstream_third"
+    if grep -q '|' <<<"$repo_upstream_full"; then
+      repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
+      echo "Upstream: $repo_upstream"
+      repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
+      repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
+      is_tag=false
+      if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
+        echo "Using tag as upstream"
+        is_tag=true
+        repo_upstream_rev="$repo_upstream_third"
+      fi
+    else
+      # our own branch
+      repo_upstream_rev="$repo_upstream_full"
+      repo_upstream="https://git.halogenos.org/halogenOS/$repo_name"
+      echo "Our upstream $repo_upstream with rev $repo_upstream_rev"
+      is_tag=false
     fi
   fi
   echo "Upstream revision: $repo_upstream_rev"
