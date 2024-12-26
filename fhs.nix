@@ -5,11 +5,13 @@ pkgs.buildFHSUserEnv {
   targetPkgs = pkgs: with pkgs; [
       bc
       ccache
+      clangStdenv
       fontconfig
       freetype
+      gcc
       git git-lfs
       git-repo
-      glibc.dev
+      glibc glibc.dev
       gnumake
       imagemagick
       libbsd.dev
@@ -38,5 +40,7 @@ pkgs.buildFHSUserEnv {
   runScript = "zsh";
   profile = ''
     export LD_LIBRARY_PATH=/usr/lib:/usr/lib32
+    export LIBGCC_DIR="$(dirname $(${pkgs.gcc.out}/bin/gcc -print-libgcc-file-name))"
+    export GCC_DIR="${pkgs.gcc.out}"
   '';
 }
