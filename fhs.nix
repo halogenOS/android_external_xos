@@ -41,6 +41,5 @@ pkgs.buildFHSUserEnv {
   profile = ''
     export LD_LIBRARY_PATH=/usr/lib:/usr/lib32
     export LIBGCC_DIR="$(dirname $(${pkgs.gcc.out}/bin/gcc -print-libgcc-file-name))"
-    export GCC_DIR="${pkgs.gcc.out}"
   '';
 }
