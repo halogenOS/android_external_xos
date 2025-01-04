@@ -74,6 +74,7 @@ while read path; do
     git fetch --unshallow $repo_remote
   fi
 
+  echo "Current branch: $(git branch --show-current), short revision: ${short_revision}"
   if [[ ${short_revision} != $(git branch --show-current) ]]; then
     git checkout --track $repo_remote/$short_revision || \
     git checkout $short_revision || (
