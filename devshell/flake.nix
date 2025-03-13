@@ -44,6 +44,7 @@
           payload-dumper-go
         ];
         LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
+        FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
       }
     );
   };
