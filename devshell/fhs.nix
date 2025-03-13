@@ -35,8 +35,7 @@ pkgs.buildFHSUserEnv {
       # misc packages
       payload-dumper-go
   ];
-  multiPkgs = pkgs: with pkgs; [
-  ];
+  multiPkgs = pkgs: [];
   runScript = "zsh";
   profile = ''
     export LD_LIBRARY_PATH=/usr/lib:/usr/lib32
