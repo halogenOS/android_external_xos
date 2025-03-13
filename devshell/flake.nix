@@ -10,10 +10,40 @@
     devShell = forEachSystem (system:
       let pkgs = import nixpkgs { inherit system; };
       in pkgs.mkShell {
-        buildInputs = [
-          (import ./fhs.nix { inherit pkgs; })
+        buildInputs = with pkgs; [
+          bc
+          ccache
+          clangStdenv
+          fontconfig
+          freetype
+          gcc
+          git git-lfs
+          git-repo
+          glibc glibc.dev
+          gnumake
+          imagemagick
+          libbsd.dev
+          libgcc
+          libxcrypt-legacy
+          ncurses5
+          openssl openssl.dev
+          perl
+          pkgconf
+          pngcrush
+          python3
+          roboto
+          rsync
+          unzip
+          util-linux
+          xmlstarlet
+          zip
+          zlib
+          zsh
+
+          # misc packages
+          payload-dumper-go
         ];
-        shellHook = "exec aosp-env";
+        LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
       }
     );
   };
