@@ -57,7 +57,10 @@
           # misc packages
           payload-dumper-go
           strace
-        ];
+        ] ++ (with pkgs.xorg; [
+          libX11
+          libXcursor
+        ]);
         runScript = "zsh";
         profile = builtins.readFile ((pkgs.formats.keyValue {}).generate "" (
           lib.mapAttrs' (name: value: { name = "export ${name}"; inherit value; }) {
