@@ -18,7 +18,6 @@
               text = ''nix develop path:external/xos/devshell'';
             })
           ];
-          shellHook = '''';
         });
       });
     devShell = forEachSystem (system:
