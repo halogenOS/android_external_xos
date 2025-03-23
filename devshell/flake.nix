@@ -5,12 +5,27 @@
 
   outputs = { nixpkgs, ... }:
   let
-  forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
+    forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
+    lib = nixpkgs.lib;
   in {
+    packages = forEachSystem (system:
+      let pkgs = import nixpkgs { inherit system; };
+      in {
+        direnvShell = (pkgs.mkShell {
+          packages = [
+            (pkgs.writeShellApplication {
+              name = "aosp-env";
+              text = ''nix develop path:external/xos/devshell'';
+            })
+          ];
+          shellHook = '''';
+        });
+      });
     devShell = forEachSystem (system:
       let pkgs = import nixpkgs { inherit system; };
-      in pkgs.mkShell {
-        buildInputs = with pkgs; [
+      in (pkgs.buildFHSEnvBubblewrap {
+        name = "aosp-env";
+        targetPkgs = pkgs: with pkgs; [
           bc
           ccache
           clangStdenv
@@ -42,10 +57,18 @@
 
           # misc packages
           payload-dumper-go
+          strace
         ];
-        LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
-        FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
-      }
+        runScript = "zsh";
+        profile = builtins.readFile ((pkgs.formats.keyValue {}).generate "" (
+          lib.mapAttrs' (name: value: { name = "export ${name}"; inherit value; }) {
+            LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
+            FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
+            LD_LIBRARY_PATH="/usr/lib:/usr/lib32";
+            DIRENV_DISABLE = 1;
+          }
+        ));
+      }).env
     );
   };
 }
