@@ -7,23 +7,8 @@
   let
     forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
     lib = nixpkgs.lib;
-  in {
-    packages = forEachSystem (system:
-      let pkgs = import nixpkgs { inherit system; };
-      in {
-        direnvShell = (pkgs.mkShell {
-          packages = [
-            (pkgs.writeShellApplication {
-              name = "aosp-env";
-              text = ''nix develop path:external/xos/devshell'';
-            })
-          ];
-        });
-      });
-    devShell = forEachSystem (system:
-      let pkgs = import nixpkgs { inherit system; };
-      in (pkgs.buildFHSEnvBubblewrap {
-        name = "aosp-env";
+    fhs = name: pkgs: attrs: pkgs.buildFHSEnvBubblewrap ({
+        inherit name;
         targetPkgs = pkgs: with pkgs; [
           bc
           ccache
@@ -61,7 +46,6 @@
           libX11
           libXcursor
         ]);
-        runScript = "zsh";
         profile = builtins.readFile ((pkgs.formats.keyValue {}).generate "" (
           lib.mapAttrs' (name: value: { name = "export ${name}"; inherit value; }) {
             LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
@@ -69,7 +53,25 @@
             LD_LIBRARY_PATH="/usr/lib:/usr/lib32";
           }
         ));
-      }).env
+      } // attrs);
+  in rec {
+    packages = forEachSystem (system:
+      let pkgs = import nixpkgs { inherit system; };
+      in {
+        direnvShell = (pkgs.mkShell {
+          packages = [
+            (pkgs.writeShellApplication {
+              name = "aosp-env";
+              text = ''nix develop path:external/xos/devshell'';
+            })
+            packages.${system}.execShell
+          ];
+        });
+        execShell = fhs "exec-aosp-env" pkgs {};
+      });
+    devShell = forEachSystem (system:
+      let pkgs = import nixpkgs { inherit system; };
+      in (fhs "aosp-env" pkgs { runScript = "zsh"; }).env
     );
   };
 }
