@@ -42,9 +42,32 @@
           # misc packages
           payload-dumper-go
           strace
+
+          # for emulator
+          libpulseaudio
+          libpng
+          nss
+          nspr
+          expat
+          libdrm
+          libbsd
+          xcb-util-cursor
+          libxkbcommon
+          libsForQt5.qt5.qtwayland
+          xwayland
         ] ++ (with pkgs.xorg; [
           libX11
           libXcursor
+          libxcb
+          xcbutilimage
+          xcbutilwm
+          xcbutilkeysyms
+          xcbutilrenderutil
+          libXi
+          libXext
+          libxkbfile
+          libSM
+          libICE
         ]);
         profile = builtins.readFile ((pkgs.formats.keyValue {}).generate "" (
           lib.mapAttrs' (name: value: { name = "export ${name}"; inherit value; }) {
