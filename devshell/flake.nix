@@ -23,6 +23,8 @@
           imagemagick
           libbsd.dev
           libgcc
+          clang_19
+          lld_19
           libxcrypt-legacy
           ncurses5
           openssl openssl.dev
