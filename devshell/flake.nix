@@ -11,8 +11,12 @@
         inherit name;
         targetPkgs = pkgs: with pkgs; [
           bc
+          bison
           ccache
+          clang_19
           clangStdenv
+          elfutils elfutils.dev
+          flex
           fontconfig
           freetype
           gcc
@@ -22,11 +26,12 @@
           gnumake
           imagemagick
           libbsd.dev
+          libelf
           libgcc
-          clang_19
           lld_19
+          llvm_19
           libxcrypt-legacy
-          ncurses5
+          ncurses5 ncurses ncurses.dev
           openssl openssl.dev
           perl
           pkgconf
