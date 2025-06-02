@@ -673,7 +673,7 @@ def build_project_mappings(manifest_path: Path) -> Dict[str, ProjectMapping]:
     # Get default remote and revision from manifest
     default = manifest_root.find('default')
     default_remote = default.get('remote', 'XOS') if default is not None else 'XOS'
-    rom_revision = os.environ.get('ROM_REVISION', 'XOS-16.0')
+    rom_revision = os.environ.get('ROM_REVISION', 'XOS-16.2')
     default_revision = default.get('revision', f'refs/heads/{rom_revision}') if default is not None else f'refs/heads/{rom_revision}'
 
     # Build remotes map

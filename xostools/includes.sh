@@ -1,4 +1,4 @@
-export ROM_REVISION="XOS-16.0"
+export ROM_REVISION="XOS-16.2"
 
 function getPlatformPath() {
   PWD="$(pwd)"
