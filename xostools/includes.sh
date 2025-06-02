@@ -1,5 +1,3 @@
-#!/bin/bash
-
 export ROM_REVISION="XOS-16.0"
 
 function getPlatformPath() {
