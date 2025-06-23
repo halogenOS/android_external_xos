@@ -13,7 +13,7 @@
           bc
           bison
           ccache
-          clang_19
+          clang_20
           clangStdenv
           elfutils elfutils.dev
           flex
@@ -28,8 +28,8 @@
           libbsd.dev
           libelf
           libgcc
-          lld_19
-          llvm_19
+          lld_20
+          llvm_20
           libxcrypt-legacy
           ncurses5 ncurses ncurses.dev
           openssl openssl.dev
