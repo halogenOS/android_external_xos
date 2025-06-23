@@ -24,6 +24,7 @@
           git-repo
           glibc glibc.dev
           gnumake
+          go
           imagemagick
           libbsd.dev
           libelf
