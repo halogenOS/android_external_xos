@@ -81,7 +81,7 @@
           lib.mapAttrs' (name: value: { name = "export ${name}"; inherit value; }) {
             LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
             FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
-            LD_LIBRARY_PATH="/usr/lib:/usr/lib32";
+            LD_LIBRARY_PATH="/usr/lib64";
           }
         ));
       } // attrs);
