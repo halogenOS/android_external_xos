@@ -22,6 +22,7 @@
                 ccache
                 clang_20
                 clangStdenv
+                dtc
                 elfutils
                 elfutils.dev
                 flex
@@ -77,6 +78,8 @@
                 libsForQt5.qt5.qtwayland
                 xwayland
                 crosvm
+                dbus
+                mesa.drivers
               ]
               ++ (with pkgs.xorg; [
                 libX11
