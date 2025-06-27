@@ -79,7 +79,7 @@
                 xwayland
                 crosvm
                 dbus
-                mesa.drivers
+                mesa
               ]
               ++ (with pkgs.xorg; [
                 libX11
