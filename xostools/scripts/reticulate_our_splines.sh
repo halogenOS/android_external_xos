@@ -58,10 +58,10 @@ for path in ${list[@]}; do
   else
     repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
     if grep -q '|' <<<"$repo_upstream_full"; then
-      repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1)
+      repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1 | cut -d '#' -f1)
       echo "Upstream: $repo_upstream"
-      repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2)
-      repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3)
+      repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2 | cut -d '#' -f2)
+      repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3 | cut -d '#' -f3)
       is_tag=false
       if [ "$repo_upstream_rev" == "tag" ] && [ -n "$repo_upstream_third" ]; then
         echo "Using tag as upstream"
