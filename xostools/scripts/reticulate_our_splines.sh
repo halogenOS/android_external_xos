@@ -57,7 +57,7 @@ for path in ${list[@]}; do
     fi
   else
     repo_upstream_full=$(xmlstarlet sel -t -v "/manifest/project[@path='$path']/@upstream" full-manifest.xml)
-    if grep -q '|' <<<"$repo_upstream_full"; then
+    if grep -q '|' <<<"$repo_upstream_full" || grep -q '#' <<<"$repo_upstream_full"; then
       repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1 | cut -d '#' -f1)
       echo "Upstream: $repo_upstream"
       repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2 | cut -d '#' -f2)
