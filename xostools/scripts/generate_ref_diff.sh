@@ -108,7 +108,7 @@ for path in $all_paths; do
         fi
         if ! $did_start; then
             echo -e "\033[1m$path\033[0m"
-            echo '```' >> "$genfile_summary"
+            echo '```' > "$genfile_summary"
             did_start=true
         fi
         short_hash=$(git log --pretty=format:%h -n 1 $commit)
@@ -124,7 +124,7 @@ for path in $all_paths; do
 
     if $did_start; then
         echo '```' >> "$genfile_summary"
-        echo '```diff' >> $genfile_diff
+        echo '```diff' > $genfile_diff
         git diff $from_commit_hash $to_commit_hash >> "$genfile_diff"
         echo '```' >> $genfile_diff
         echo | tee -a "$genfile_summary" "$genfile_diff"
