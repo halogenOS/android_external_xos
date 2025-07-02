@@ -112,7 +112,7 @@ function build() {
                     echo "You have decided to build $module"
 		device=${target#*_}
 		device=${device%%-*}
-                lunch ${target//-/ } || (breakfast $device && lunch ${target//-/ }) || return 1
+                eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
