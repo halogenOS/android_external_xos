@@ -83,26 +83,6 @@ fi
 # Import help functions
 source $(gettop)/external/xos/xostools/xostoolshelp.sh
 
-# Build emulator SDK addon
-function buildemu() {
-    cleanarg=""
-    device="$1"
-    if [ -z "$device" ]; then
-        echo "Missing device, please specify"
-	return
-    fi
-    if [ "$2" = "noclean" ]; then
-      cleanarg="noclean"
-      echo "noclean enabled, skipping clean."
-    fi
-
-    build module $device sdk_addon $cleanarg
-}
-
-function buildemu_x86_64() {
-    buildemu aosp_cf_x86_64_phone-trunk_staging-userdebug
-}
-
 # Build function
 function build() {
     buildarg="$1"
@@ -130,7 +110,9 @@ function build() {
                 echob "Starting build..."
                 [ -z "$module" ] && module="bacon" || \
                     echo "You have decided to build $module"
-                lunch $target || (breakfast $target && lunch $target) || return 1
+		device=${target#*_}
+		device=${device%%-*}
+                lunch ${target//-/ } || (breakfast $device && lunch ${target//-/ }) || return 1
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
