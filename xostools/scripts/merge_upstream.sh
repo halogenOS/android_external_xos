@@ -32,8 +32,8 @@ while read path; do
   if grep -q '|' <<<"$repo_upstream_full" || grep -q '#' <<<"$repo_upstream_full"; then
     repo_upstream=$(echo "$repo_upstream_full" | cut -d '|' -f1 | cut -d '#' -f1)
     echo "Upstream: $repo_upstream"
-    repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2 | cut -d '#' -f1)
-    repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3 | cut -d '#' -f1)
+    repo_upstream_rev=$(echo "$repo_upstream_full" | cut -d '|' -f2 | cut -d '#' -f2)
+    repo_upstream_third=$(echo "$repo_upstream_full" | cut -d '|' -f3 | cut -d '#' -f3)
     is_tag_or_commit=false
     if ( [ "$repo_upstream_rev" == "tag" ] || [ "$repo_upstream_rev" == "commit" ] ) && [ -n "$repo_upstream_third" ]; then
       echo "Using tag as upstream"
