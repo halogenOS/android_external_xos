@@ -95,7 +95,14 @@
                 libSM
                 libICE
               ]);
-            profile = builtins.readFile (
+            profile =
+              let
+                bootanimPythonEnv = pkgs.python3.withPackages (ps: with ps; [
+                  pillow
+                  numpy
+                ]);
+              in
+              builtins.readFile (
               (pkgs.formats.keyValue { }).generate "" (
                 lib.mapAttrs'
                   (name: value: {
@@ -106,6 +113,7 @@
                     LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
                     FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
                     LD_LIBRARY_PATH = "/usr/lib64";
+                    BOOTANIM_PYTHON_ENV="${bootanimPythonEnv}";
                   }
               )
             );
