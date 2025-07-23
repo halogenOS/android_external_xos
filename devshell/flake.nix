@@ -29,6 +29,7 @@
                 fontconfig
                 freetype
                 gcc
+                gcc.cc
                 git
                 git-lfs
                 git-repo
