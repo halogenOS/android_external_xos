@@ -9,7 +9,7 @@
       forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
       lib = nixpkgs.lib;
       fhs =
-        name: pkgs: attrs:
+        name: pkgs: attrs: additionalPkgs:
         pkgs.buildFHSEnvBubblewrap (
           {
             inherit name;
@@ -66,6 +66,9 @@
                 payload-dumper-go
                 strace
 
+                # some SDK tools need this
+                alsa-lib
+
                 # for emulator
                 libpulseaudio
                 libpng
@@ -95,7 +98,7 @@
                 libxkbfile
                 libSM
                 libICE
-              ]);
+              ]) ++ additionalPkgs;
             profile =
               let
                 bootanimPythonEnv = pkgs.python3.withPackages (ps: with ps; [
@@ -154,7 +157,12 @@
               ];
             }
           );
-          execShell = fhs "exec-aosp-env" pkgs { };
+          execShell = fhs "exec-aosp-env" pkgs { } [ ];
+          aautoShell =
+            let
+              pkgs = import nixpkgs { inherit system; };
+            in
+            (fhs "aauto-env" pkgs { runScript = "zsh"; } [ pkgs.llvmPackages_20.libcxx ]).env;
         }
       );
       devShell = forEachSystem (
@@ -162,7 +170,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        (fhs "aosp-env" pkgs { runScript = "zsh"; }).env
+        (fhs "aosp-env" pkgs { runScript = "zsh"; } [ ]).env
       );
       formatter = forEachSystem (
         system:
