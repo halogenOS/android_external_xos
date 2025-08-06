@@ -45,7 +45,7 @@ generateRefDiff() {
 }
 
 mirrorAll() {
-    TOP="$(gettop)" bash -i "$(gettop)/external/xos/xostools/scripts/mirror_all.sh" $@
+    TOP="$(gettop)" nix run path:"$(gettop)/external/xos/xostools-ng#mirror-all" -- $@
 }
 
 generateMissingKeys() {
