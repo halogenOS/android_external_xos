@@ -46,15 +46,26 @@ class SnapshotCreator:
             return True
 
         try:
-            result = subprocess.run(
+            # Use Popen for real-time output streaming
+            process = subprocess.Popen(
                 command,
                 shell=True,
                 cwd=self.top,
-                capture_output=True,
-                text=True
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
             )
-            if result.returncode != 0:
-                print(f"Error: {result.stderr}")
+
+            # Stream output in real-time
+            for line in iter(process.stdout.readline, ''):
+                print(line, end='')
+
+            process.wait()
+
+            if process.returncode != 0:
+                print(f"\nCommand failed with return code {process.returncode}")
                 return False
             return True
         except Exception as e:
