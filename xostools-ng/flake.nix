@@ -87,6 +87,31 @@
           meta.mainProgram = pname;
         };
 
+        # Merge upstream script as a Python application
+        merge-upstream = python3Packages.buildPythonApplication rec {
+          pname = "merge-upstream";
+          version = "16.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            gitpython
+            lxml
+            rich
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp merge_upstream.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Development shell
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -116,6 +141,7 @@
             echo "Available scripts:"
             echo "  python mirror_all.py        - Mirror repositories"
             echo "  python create_snapshot.py   - Create snapshot tags"
+            echo "  python merge_upstream.py    - Merge upstream changes"
             echo ""
             echo "Make sure TOP is set and build/envsetup.sh is sourced"
           '';
@@ -127,6 +153,7 @@
           default = create-snapshot;
           mirror-all = mirror-all;
           create-snapshot = create-snapshot;
+          merge-upstream = merge-upstream;
           xos-common = xos-common;
         };
 
@@ -142,6 +169,10 @@
           create-snapshot = {
             type = "app";
             program = lib.getExe create-snapshot;
+          };
+          merge-upstream = {
+            type = "app";
+            program = lib.getExe merge-upstream;
           };
         };
 
