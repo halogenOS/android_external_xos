@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Create snapshot tags for repositories.
-Version: 16.0
 
 Creates timestamped tags for all repositories specified in the manifest snippet,
 allowing for easy restoration to a known state.

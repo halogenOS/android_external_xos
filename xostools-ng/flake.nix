@@ -17,7 +17,7 @@
         # XOS common module as a Python package
         xos-common = python3Packages.buildPythonPackage rec {
           pname = "xos-common";
-          version = "16.0";
+          version = "1.0";
 
           src = ./.;
 
@@ -38,7 +38,7 @@
         # Mirror all script as a Python application
         mirror-all = python3Packages.buildPythonApplication rec {
           pname = "mirror-all";
-          version = "16.0";
+          version = "1.0";
 
           src = ./.;
 
@@ -65,7 +65,7 @@
         # Create snapshot script as a Python application
         create-snapshot = python3Packages.buildPythonApplication rec {
           pname = "create-snapshot";
-          version = "16.0";
+          version = "1.0";
 
           src = ./.;
 
@@ -90,7 +90,7 @@
         # Merge upstream script as a Python application
         merge-upstream = python3Packages.buildPythonApplication rec {
           pname = "merge-upstream";
-          version = "16.0";
+          version = "1.0";
 
           src = ./.;
 

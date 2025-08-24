@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Merge upstream changes for repositories.
-Version: 16.0
 
 Merges upstream changes from remote repositories into local branches,
 supporting multi-threading, progress bars, and deferred pushing.
@@ -373,14 +372,15 @@ class UpstreamMerger:
         """Parse projects with upstream configuration from manifest."""
         if self.dry_run:
             # Return dummy tasks for dry run
+            rom_revision = os.environ['ROM_REVISION']
             return [
                 MergeTask(
                     ProjectInfo("dummy/path", "dummy-project", "XOS"),
                     Path("/tmp/dummy"),
                     UpstreamConfig("https://example.com/dummy.git", "main"),
                     "XOS",
-                    "refs/heads/XOS-16.0",
-                    "XOS-16.0"
+                    f"refs/heads/{rom_revision}",
+                    rom_revision
                 )
             ]
 
@@ -393,7 +393,8 @@ class UpstreamMerger:
             # Get default remote and revision
             default = root.find('default')
             default_remote = default.get('remote', 'XOS') if default is not None else 'XOS'
-            default_revision = default.get('revision', 'refs/heads/XOS-16.0') if default is not None else 'refs/heads/XOS-16.0'
+            rom_revision = os.environ['ROM_REVISION']
+            default_revision = default.get('revision', f'refs/heads/{rom_revision}') if default is not None else f'refs/heads/{rom_revision}'
 
             # Build remotes map
             remotes = {}
