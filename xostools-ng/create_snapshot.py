@@ -9,11 +9,17 @@ allowing for easy restoration to a known state.
 
 import os
 import sys
+import signal
 import argparse
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
+from rich.console import Console
+from dataclasses import dataclass
+import threading
 import git
 
 # Add xos_common to path
@@ -25,12 +31,62 @@ from xos_common import (
     ProjectInfo
 )
 
+console = Console()
+
+# Global stop event for graceful shutdown
+stop_event = threading.Event()
+executor = None
+
+def signal_handler(signum, frame):
+    """Handle SIGINT (Ctrl+C) gracefully."""
+    console.print("\n[red]Interrupted! Shutting down workers...[/red]")
+    stop_event.set()
+    if executor:
+        executor.shutdown(wait=False, cancel_futures=True)
+    sys.exit(1)
+
+# Set up signal handler
+signal.signal(signal.SIGINT, signal_handler)
+
+@dataclass
+class TagTask:
+    """A single tag creation task."""
+    project: ProjectInfo
+    project_path: Path
+    tag_name: str
+    extra_args: List[str]
+
+
+def process_single_project(task: TagTask, dry_run: bool, remote_name: str) -> Tuple[str, bool, str, str]:
+    """Process a single project for tag creation."""
+    project_path = task.project_path
+    tag_name = task.tag_name
+    project_name = task.project.path
+
+    if not project_path.exists():
+        return project_name, False, "directory not found", ""
+
+    # Create temporary SnapshotCreator instance for operations
+    temp_creator = SnapshotCreator(remote_name=remote_name, dry_run=dry_run)
+
+    # Unshallow if needed
+    unshallow_success, unshallow_msg = temp_creator.unshallow_if_needed(project_path)
+    if not unshallow_success:
+        return project_name, False, f"unshallow failed: {unshallow_msg}", ""
+
+    # Create and push tag
+    tag_success, tag_msg = temp_creator.create_and_push_tag(project_path, tag_name, task.extra_args)
+    status = "success" if tag_success else "failed"
+
+    return project_name, tag_success, status, tag_msg
+
 
 class SnapshotCreator:
-    def __init__(self, remote_name: str = "XOS", no_reset: bool = False, dry_run: bool = False):
+    def __init__(self, remote_name: str = "XOS", no_reset: bool = False, dry_run: bool = False, max_workers: int = 8):
         self.remote_name = remote_name
         self.no_reset = no_reset
         self.dry_run = dry_run
+        self.max_workers = max_workers
         self.top = get_android_top()
         self.snippet_path = self.top / ".repo/manifests/snippets/XOS.xml"
 
@@ -106,90 +162,149 @@ class SnapshotCreator:
 
         return f"{revision}-{timestamp}{suffix or ''}"
 
-    def unshallow_if_needed(self, repo_path: Path) -> bool:
+    def unshallow_if_needed(self, repo_path: Path) -> Tuple[bool, str]:
         """Unshallow repository if it's shallow."""
         if GitOperations.is_shallow_repo(repo_path):
-            print(f"  Shallow repository detected, unshallowing...")
             if self.dry_run:
-                print(f"  [DRY RUN] Would unshallow repository")
-                return True
-            return GitOperations.unshallow_repo(repo_path)
-        return True
+                return True, "would unshallow (dry run)"
+            if GitOperations.unshallow_repo(repo_path):
+                return True, "unshallowed successfully"
+            else:
+                return False, "failed to unshallow"
+        return True, "not shallow"
+
+    def check_remote_tag_exists(self, repo_path: Path, tag_name: str) -> bool:
+        """Check if tag already exists on remote."""
+        try:
+            repo = git.Repo(repo_path)
+            remote = repo.remote(self.remote_name)
+            # Fetch tags to ensure we have latest info
+            remote.fetch(tags=True)
+            return f"refs/tags/{tag_name}" in [ref.path for ref in remote.refs]
+        except Exception:
+            return False
 
     def create_and_push_tag(self, repo_path: Path, tag_name: str,
-                           extra_args: List[str] = None) -> bool:
+                           extra_args: List[str] = None) -> Tuple[bool, str]:
         """Create and push a tag for a repository."""
         # For now, we'll use simple tag creation without message
         # Extra args support can be added later if needed
         message = f"Snapshot tag created at {datetime.now().isoformat()}"
 
         if self.dry_run:
-            print(f"  [DRY RUN] Would create and push tag '{tag_name}' to remote '{self.remote_name}'")
-            return True
+            if self.check_remote_tag_exists(repo_path, tag_name):
+                return True, "already exists (dry run)"
+            return True, "would create and push (dry run)"
+
+        # Check if tag already exists on remote
+        if self.check_remote_tag_exists(repo_path, tag_name):
+            return True, "already exists on remote"
 
         if GitOperations.create_and_push_tag(repo_path, tag_name, "HEAD",
                                             self.remote_name, message):
-            print(f"  Tag {tag_name} created and pushed successfully")
-            return True
+            return True, "created and pushed successfully"
         else:
             # Try without message if annotated tag fails
             if GitOperations.create_tag(repo_path, tag_name):
                 if GitOperations.push_tag(repo_path, tag_name, self.remote_name):
-                    print(f"  Tag {tag_name} created and pushed successfully")
-                    return True
-            print(f"  Failed to create/push tag")
-            return False
+                    return True, "created and pushed successfully"
+            return False, "failed to create/push tag"
 
-    def process_projects(self, tag_name: str, extra_args: List[str] = None):
-        """Process all projects and create tags."""
+    def process_projects(self, tag_name: str, extra_args: List[str] = None, max_workers: int = 8):
+        """Process all projects and create tags using multi-threading."""
+        global executor
+
         # Get projects filtered by remote
         projects = self.manifest.get_projects_by_remote(self.remote_name)
 
         if not projects:
-            print(f"No projects found with remote '{self.remote_name}'")
+            console.print(f"[red]No projects found with remote '{self.remote_name}'[/red]")
             return
 
         dry_run_prefix = "[DRY RUN] " if self.dry_run else ""
-        print(f"\n{dry_run_prefix}Creating snapshot tag: {tag_name}")
-        print(f"Processing {len(projects)} projects...\n")
+        console.print(f"\n[bold]{dry_run_prefix}Creating snapshot tag: {tag_name}[/bold]")
+        console.print(f"Processing {len(projects)} projects...\n")
+
+        # Prepare tasks
+        tasks = []
+        for project in projects:
+            project_path = self.top / project.path
+            tasks.append(TagTask(project, project_path, tag_name, extra_args or []))
 
         success_count = 0
         failed_projects = []
+        already_exists_count = 0
 
-        for project in projects:
-            project_path = self.top / project.path
+        # Process with progress bar and threading
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+            console=console
+        ) as progress:
 
-            if not project_path.exists():
-                print(f"Skipping {project.path}: Directory not found")
-                continue
+            task_progress = progress.add_task(
+                f"[cyan]Processing projects {dry_run_prefix.strip()}",
+                total=len(tasks)
+            )
 
-            print(f"Processing {project.path}...")
+            with ThreadPoolExecutor(max_workers=max_workers) as executor_pool:
+                executor = executor_pool
 
-            # Unshallow if needed
-            if not self.unshallow_if_needed(project_path):
-                failed_projects.append(project.path)
-                continue
+                # Submit all tasks
+                futures = {
+                    executor_pool.submit(process_single_project, task, self.dry_run, self.remote_name): task
+                    for task in tasks
+                }
 
-            # Create and push tag
-            if self.create_and_push_tag(project_path, tag_name, extra_args):
-                success_count += 1
-            else:
-                failed_projects.append(project.path)
+                # Process results as they complete
+                for future in as_completed(futures):
+                    if stop_event.is_set():
+                        executor_pool.shutdown(wait=False, cancel_futures=True)
+                        break
 
-            print()  # Empty line for readability
+                    try:
+                        task = futures[future]
+                        project_name, success, status, message = future.result()
+
+                        if success:
+                            success_count += 1
+                            if "already exists" in message:
+                                already_exists_count += 1
+                                console.print(f"[yellow]✓[/yellow] {project_name}: Tag already exists on remote")
+                            elif self.dry_run:
+                                console.print(f"[blue]✓[/blue] {project_name}: {message}")
+                            else:
+                                console.print(f"[green]✓[/green] {project_name}: {message}")
+                        else:
+                            failed_projects.append((project_name, message))
+                            console.print(f"[red]✗[/red] {project_name}: {message}")
+
+                        progress.update(task_progress, advance=1)
+
+                    except Exception as e:
+                        task = futures[future]
+                        failed_projects.append((task.project.path, f"exception: {str(e)}"))
+                        console.print(f"[red]✗[/red] {task.project.path}: Exception: {e}")
+                        progress.update(task_progress, advance=1)
 
         # Summary
-        print("=" * 60)
-        print(f"Snapshot creation complete!")
-        print(f"Tag name: {tag_name}")
-        print(f"Successfully tagged: {success_count}/{len(projects)} projects")
+        console.print("\n" + "=" * 60)
+        console.print(f"[bold]Snapshot creation complete![/bold]")
+        console.print(f"[bold]Tag name:[/bold] {tag_name}")
+        console.print(f"[green]Successfully tagged:[/green] {success_count}/{len(projects)} projects")
+
+        if already_exists_count > 0:
+            console.print(f"[yellow]Already existed on remote:[/yellow] {already_exists_count} projects")
 
         if failed_projects:
-            print(f"\nFailed projects ({len(failed_projects)}):")
-            for project in failed_projects:
-                print(f"  - {project}")
+            console.print(f"\n[red]Failed projects ({len(failed_projects)}):[/red]")
+            for project_name, error in failed_projects:
+                console.print(f"  [red]- {project_name}:[/red] {error}")
 
-        print("\nEverything done.")
+        console.print("\n[bold green]Everything done.[/bold green]")
 
     def run(self, custom_tag: Optional[str] = None,
             tag_suffix: Optional[str] = None,
@@ -221,7 +336,8 @@ class SnapshotCreator:
             return 1
 
         # Process all projects
-        self.process_projects(tag_name, extra_git_args)
+        max_workers = getattr(self, 'max_workers', 8)
+        self.process_projects(tag_name, extra_git_args, max_workers)
 
         return 0
 
@@ -235,6 +351,7 @@ Examples:
   %(prog)s                    # Create snapshot with auto-generated tag
   %(prog)s --no-reset         # Skip repository reset and sync
   %(prog)s --dry-run          # Show what would be done without making changes
+  %(prog)s --workers 4        # Use 4 parallel workers
   %(prog)s my-snapshot        # Use custom tag name
   %(prog)s --suffix -test     # Add suffix to auto-generated tag
         """
@@ -250,6 +367,13 @@ Examples:
         "--dry-run",
         action="store_true",
         help="Show what would be done without making any changes"
+    )
+
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="Number of parallel workers (default: 8)"
     )
 
     parser.add_argument(
@@ -285,7 +409,8 @@ Examples:
         creator = SnapshotCreator(
             remote_name=args.remote,
             no_reset=args.no_reset,
-            dry_run=args.dry_run
+            dry_run=args.dry_run,
+            max_workers=args.workers
         )
 
         return creator.run(

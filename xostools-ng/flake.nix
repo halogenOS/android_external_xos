@@ -74,6 +74,7 @@
           propagatedBuildInputs = with python3Packages; [
             gitpython
             lxml
+            rich
             xos-common
           ];
 
