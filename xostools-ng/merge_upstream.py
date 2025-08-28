@@ -18,6 +18,7 @@ from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
 from rich.console import Console
+from rich.table import Table
 from dataclasses import dataclass
 import threading
 import tempfile
@@ -73,6 +74,7 @@ class MergeResult:
     needs_push: bool = False
     push_command: Optional[str] = None
     had_lfs: bool = False
+    merge_info: Optional[Dict[str, Any]] = None
 
 
 def parse_upstream_config(upstream_full: str, repo_name: str) -> UpstreamConfig:
@@ -200,10 +202,48 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
         upstream_rev = task.upstream_config.upstream_rev
 
         if dry_run:
+            # Check current branch and status for better dry-run info
+            try:
+                current_branch = repo.active_branch.name
+            except TypeError:
+                # Handle detached HEAD state
+                current_branch = "detached HEAD"
+            target_branch = task.short_revision
+
+            # Check if repo is shallow
+            is_shallow = GitOperations.is_shallow_repo(project_path)
+            shallow_info = " (shallow repo - would unshallow)" if is_shallow else ""
+
+            # Check if we need to switch branches
+            branch_info = ""
+            if current_branch != target_branch:
+                branch_info = f" (would checkout {target_branch} from {current_branch})"
+
+            # Check for LFS
+            lfsconfig_exists = (project_path / ".lfsconfig").exists()
+            gitattributes_has_lfs = False
+            gitattributes_path = project_path / ".gitattributes"
+            if gitattributes_path.exists():
+                with open(gitattributes_path, 'r') as f:
+                    gitattributes_has_lfs = 'merge=lfs' in f.read()
+            lfs_info = " (has LFS - would cleanup)" if (lfsconfig_exists or gitattributes_has_lfs) else ""
+
+            # Store additional info for table display
+            merge_info = {
+                "upstream_url": upstream_url,
+                "upstream_rev": upstream_rev,
+                "target_branch": target_branch,
+                "current_branch": current_branch,
+                "is_shallow": is_shallow,
+                "has_lfs": (lfsconfig_exists or gitattributes_has_lfs),
+                "needs_branch_switch": current_branch != target_branch
+            }
+
             return MergeResult(
                 project_name,
                 True,
-                f"would merge {upstream_url}@{upstream_rev} (dry run)"
+                f"would merge {upstream_url}@{upstream_rev}{shallow_info}{branch_info}{lfs_info}",
+                merge_info=merge_info
             )
 
         # Add/update upstream remote
@@ -220,7 +260,12 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
                 return MergeResult(project_name, False, "failed to unshallow repository")
 
         # Ensure we're on the correct branch
-        current_branch = repo.active_branch.name
+        try:
+            current_branch = repo.active_branch.name
+        except TypeError:
+            # Handle detached HEAD state - we need to checkout the target branch
+            current_branch = None
+
         target_branch = task.short_revision
 
         if current_branch != target_branch:
@@ -270,13 +315,25 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
         # Prepare push command for later execution
         push_cmd = f"git push XOS HEAD:{target_branch}"
 
+        # Store merge info for table display
+        merge_info = {
+            "upstream_url": upstream_url,
+            "upstream_rev": upstream_rev,
+            "target_branch": target_branch,
+            "current_branch": current_branch if current_branch else "detached HEAD",
+            "is_shallow": GitOperations.is_shallow_repo(project_path),
+            "has_lfs": had_lfs,
+            "needs_branch_switch": current_branch != target_branch
+        }
+
         return MergeResult(
             project_name,
             True,
             "merge completed successfully",
             needs_push=True,
             push_command=push_cmd,
-            had_lfs=had_lfs
+            had_lfs=had_lfs,
+            merge_info=merge_info
         )
 
     except Exception as e:
@@ -284,10 +341,11 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
 
 
 class UpstreamMerger:
-    def __init__(self, no_reset: bool = False, dry_run: bool = False, max_workers: int = 4):
+    def __init__(self, no_reset: bool = False, dry_run: bool = False, max_workers: int = 4, push_only: bool = False):
         self.no_reset = no_reset
         self.dry_run = dry_run
         self.max_workers = max_workers
+        self.push_only = push_only
         self.top = get_android_top()
 
     def run_repo_command(self, command: str) -> bool:
@@ -344,14 +402,12 @@ class UpstreamMerger:
 
     def generate_manifest(self) -> Path:
         """Generate temporary manifest file."""
-        if self.dry_run:
-            console.print("[blue][DRY RUN] Would generate temporary manifest[/blue]")
-            # Return a dummy path for dry run
-            return Path("/tmp/dummy-manifest.xml")
-
         manifest_path = self.top / "full-manifest.xml"
 
         try:
+            if self.dry_run:
+                console.print("[blue][DRY RUN] Generating temporary manifest for analysis[/blue]")
+
             result = subprocess.run(
                 ["repo", "manifest"],
                 cwd=self.top,
@@ -370,20 +426,6 @@ class UpstreamMerger:
 
     def parse_projects_with_upstream(self, manifest_path: Path) -> List[MergeTask]:
         """Parse projects with upstream configuration from manifest."""
-        if self.dry_run:
-            # Return dummy tasks for dry run
-            rom_revision = os.environ['ROM_REVISION']
-            return [
-                MergeTask(
-                    ProjectInfo("dummy/path", "dummy-project", "XOS"),
-                    Path("/tmp/dummy"),
-                    UpstreamConfig("https://example.com/dummy.git", "main"),
-                    "XOS",
-                    f"refs/heads/{rom_revision}",
-                    rom_revision
-                )
-            ]
-
         tasks = []
 
         try:
@@ -543,15 +585,8 @@ class UpstreamMerger:
 
                         if result.success:
                             successful_merges.append(result)
-
-                            if self.dry_run:
-                                console.print(f"[blue]✓[/blue] {result.project_path}: {result.message}")
-                            else:
-                                lfs_note = " (handled LFS)" if result.had_lfs else ""
-                                console.print(f"[green]✓[/green] {result.project_path}: {result.message}{lfs_note}")
                         else:
                             failed_merges.append(result)
-                            console.print(f"[red]✗[/red] {result.project_path}: {result.message}")
 
                         progress.update(merge_task, advance=1)
 
@@ -559,10 +594,83 @@ class UpstreamMerger:
                         task = futures[future]
                         failed_result = MergeResult(task.project.path, False, f"exception: {str(e)}")
                         failed_merges.append(failed_result)
-                        console.print(f"[red]✗[/red] {task.project.path}: Exception: {e}")
                         progress.update(merge_task, advance=1)
 
         return successful_merges, failed_merges
+
+    def display_merge_results(self, successful_merges: List[MergeResult], failed_merges: List[MergeResult]):
+        """Display merge results in a formatted table."""
+        if not successful_merges and not failed_merges:
+            return
+
+        def truncate_project_name(name: str, max_len: int = 45) -> str:
+            """Truncate project name with ellipsis in the middle."""
+            if len(name) <= max_len:
+                return name
+
+            # Calculate how many chars to show on each side
+            side_len = (max_len - 1) // 2  # -1 for the ellipsis character
+            return f"{name[:side_len]}…{name[-side_len:]}"
+
+        # Display successful merges
+        if successful_merges:
+            console.print(f"\n[bold green]Successful merges ({len(successful_merges)}):[/bold green]")
+
+            table = Table(show_header=True, header_style="bold blue")
+            table.add_column("Project", style="cyan", no_wrap=True)
+            table.add_column("Target Branch", style="yellow")
+            table.add_column("Current", style="dim")
+            table.add_column("Upstream URL", style="green")
+            table.add_column("Upstream Rev", style="magenta")
+            table.add_column("Notes", style="dim")
+            table.add_column("", width=2)  # Status column for emoji
+
+            for result in successful_merges:
+                if result.merge_info:
+                    info = result.merge_info
+                    notes = []
+
+                    if info.get("is_shallow"):
+                        notes.append("shallow")
+                    if info.get("has_lfs"):
+                        notes.append("LFS")
+                    if info.get("needs_branch_switch"):
+                        current = info.get("current_branch", "detached")
+                        if current == "detached HEAD":
+                            current = "detached"
+                        notes.append(f"from {current}")
+
+                    table.add_row(
+                        truncate_project_name(result.project_path),
+                        info.get("target_branch", ""),
+                        info.get("current_branch", ""),
+                        info.get("upstream_url", ""),
+                        info.get("upstream_rev", ""),
+                        ", ".join(notes) if notes else "",
+                        "✅"
+                    )
+                else:
+                    table.add_row(truncate_project_name(result.project_path), "", "", "", "", result.message, "✅")
+
+            console.print(table)
+
+        # Display failed merges in table format as well
+        if failed_merges:
+            console.print(f"\n[bold red]Failed merges ({len(failed_merges)}):[/bold red]")
+
+            fail_table = Table(show_header=True, header_style="bold red")
+            fail_table.add_column("Project", style="cyan", no_wrap=True)
+            fail_table.add_column("Error", style="red")
+            fail_table.add_column("", width=2)  # Status column for emoji
+
+            for result in failed_merges:
+                fail_table.add_row(
+                    truncate_project_name(result.project_path),
+                    result.message,
+                    "❌"
+                )
+
+            console.print(fail_table)
 
     def run(self):
         """Main execution flow."""
@@ -601,12 +709,20 @@ class UpstreamMerger:
         # Process merges
         successful_merges, failed_merges = self.process_merges(tasks)
 
+        # Display results in table format
+        self.display_merge_results(successful_merges, failed_merges)
+
         # Execute pushes for successful merges (deferred pushing)
         push_successes = 0
         push_failures = []
 
+        # Block pushing if any project failed (unless in push-only mode)
         if successful_merges and not self.dry_run:
-            push_successes, push_failures = self.execute_pushes(successful_merges)
+            if failed_merges and not self.push_only:
+                console.print(f"\n[yellow]⚠️  Skipping push because {len(failed_merges)} projects failed to merge.[/yellow]")
+                console.print("[yellow]Use --push-only flag to push successful merges after fixing failures.[/yellow]")
+            else:
+                push_successes, push_failures = self.execute_pushes(successful_merges)
 
         # Clean up temporary manifest
         if not self.dry_run and manifest_path.exists():
@@ -672,13 +788,20 @@ Examples:
         help="Number of parallel workers (default: 4)"
     )
 
+    parser.add_argument(
+        "--push-only",
+        action="store_true",
+        help="Push successful merges even if some projects failed"
+    )
+
     args = parser.parse_args()
 
     try:
         merger = UpstreamMerger(
             no_reset=args.no_reset,
             dry_run=args.dry_run,
-            max_workers=args.workers
+            max_workers=args.workers,
+            push_only=args.push_only
         )
 
         return merger.run()
