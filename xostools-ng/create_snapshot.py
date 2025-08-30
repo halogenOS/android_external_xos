@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
-from rich.console import Console
 from dataclasses import dataclass
 import threading
 import git
@@ -27,10 +26,10 @@ from xos_common import (
     ManifestParser,
     GitOperations,
     get_android_top,
-    ProjectInfo
+    ProjectInfo,
+    console,
+    run_repo_command
 )
-
-console = Console()
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -96,36 +95,7 @@ class SnapshotCreator:
 
     def run_repo_command(self, command: str) -> bool:
         """Run a repo command in the Android tree."""
-        if self.dry_run:
-            print(f"[DRY RUN] Would run: {command}")
-            return True
-
-        try:
-            # Use Popen for real-time output streaming
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                cwd=self.top,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-
-            # Stream output in real-time
-            for line in iter(process.stdout.readline, ''):
-                print(line, end='')
-
-            process.wait()
-
-            if process.returncode != 0:
-                print(f"\nCommand failed with return code {process.returncode}")
-                return False
-            return True
-        except Exception as e:
-            print(f"Failed to run {command}: {e}")
-            return False
+        return run_repo_command(command, self.top, self.dry_run)
 
     def reset_and_sync(self) -> bool:
         """Reset and sync the repo tree."""

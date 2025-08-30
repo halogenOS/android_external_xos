@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
-from rich.console import Console
 from rich.table import Table
 from dataclasses import dataclass
 import threading
@@ -28,10 +27,16 @@ from xos_common import (
     ManifestParser,
     GitOperations,
     get_android_top,
-    ProjectInfo
+    ProjectInfo,
+    console,
+    handle_lfs_cleanup,
+    safe_add_or_update_remote,
+    safe_get_remote,
+    run_repo_command,
+    generate_manifest,
+    cleanup_manifest,
+    truncate_project_name
 )
-
-console = Console()
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -98,92 +103,7 @@ def parse_upstream_config(upstream_full: str, repo_name: str) -> UpstreamConfig:
         return UpstreamConfig(upstream_url, upstream_full, False)
 
 
-def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
-    """Handle Git LFS cleanup (equivalent to unLFS function)."""
-    try:
-        repo = git.Repo(repo_path)
-
-        # Check if LFS is present
-        lfsconfig_exists = (repo_path / ".lfsconfig").exists()
-        gitattributes_has_lfs = False
-
-        gitattributes_path = repo_path / ".gitattributes"
-        if gitattributes_path.exists():
-            with open(gitattributes_path, 'r') as f:
-                gitattributes_has_lfs = 'merge=lfs' in f.read()
-
-        if not (lfsconfig_exists or gitattributes_has_lfs):
-            return True, "no LFS detected"
-
-        if dry_run:
-            return True, "would handle LFS cleanup (dry run)"
-
-        # Equivalent of the shell script unLFS function
-        commands = [
-            ["git", "lfs", "install"],
-            ["git", "lfs", "fetch"],
-            ["git", "lfs", "checkout"]
-        ]
-
-        # Run LFS commands
-        for cmd in commands:
-            try:
-                subprocess.run(cmd, cwd=repo_path, check=False, capture_output=True, text=True)
-            except Exception:
-                pass  # Ignore errors, just like the shell script with || :
-
-        # Get LFS files
-        result = subprocess.run(
-            ["git", "lfs", "ls-files"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            lfs_files = []
-            for line in result.stdout.strip().split('\n'):
-                parts = line.split()
-                if len(parts) >= 3:
-                    lfs_files.append(parts[2])
-
-            if lfs_files:
-                # Remove from cache and untrack
-                for lfs_file in lfs_files:
-                    subprocess.run(["git", "rm", "--cached", lfs_file], cwd=repo_path, check=False, capture_output=True)
-                    subprocess.run(["git", "lfs", "untrack", lfs_file], cwd=repo_path, check=False, capture_output=True)
-
-        # Remove LFS config files
-        for config_file in [".gitattributes", ".lfsconfig"]:
-            config_path = repo_path / config_file
-            if config_path.exists():
-                config_path.unlink()
-
-        # Stage and commit removal
-        repo.index.add([".gitattributes", ".lfsconfig"])
-        try:
-            repo.index.commit("Un-LFS")
-        except Exception:
-            pass  # Ignore if nothing to commit
-
-        # Uninstall LFS
-        subprocess.run(["git", "lfs", "uninstall"], cwd=repo_path, check=False, capture_output=True)
-
-        # Add LFS files directly
-        if lfs_files:
-            for lfs_file in lfs_files:
-                repo.index.add([lfs_file])
-
-        repo.index.add_all()
-        try:
-            repo.index.commit("Directly checkout LFS files")
-        except Exception:
-            pass  # Ignore if nothing to commit
-
-        return True, "LFS cleanup completed"
-
-    except Exception as e:
-        return False, f"LFS cleanup failed: {str(e)}"
+# LFS cleanup function is now imported from xos_common
 
 
 def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
@@ -247,12 +167,7 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
             )
 
         # Add/update upstream remote
-        if 'upstream' in [remote.name for remote in repo.remotes]:
-            upstream_remote = repo.remote('upstream')
-            if upstream_remote.url != upstream_url:
-                upstream_remote.set_url(upstream_url)
-        else:
-            repo.create_remote('upstream', upstream_url)
+        upstream_remote = safe_add_or_update_remote(repo, 'upstream', upstream_url)
 
         # Check if shallow and unshallow if needed
         if GitOperations.is_shallow_repo(project_path):
@@ -286,9 +201,8 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
         # Perform the merge
         try:
             # Fetch from upstream
-            if 'upstream' in [remote.name for remote in repo.remotes]:
-                upstream_remote = repo.remote('upstream')
-            else:
+            upstream_remote = safe_get_remote(repo, 'upstream')
+            if not upstream_remote:
                 return MergeResult(project_name, False, "upstream remote not found")
             upstream_remote.fetch()
 
@@ -353,36 +267,7 @@ class UpstreamMerger:
 
     def run_repo_command(self, command: str) -> bool:
         """Run a repo command in the Android tree."""
-        if self.dry_run:
-            console.print(f"[blue][DRY RUN] Would run: {command}[/blue]")
-            return True
-
-        try:
-            # Use Popen for real-time output streaming
-            process = subprocess.Popen(
-                command,
-                shell=True,
-                cwd=self.top,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-
-            # Stream output in real-time
-            for line in iter(process.stdout.readline, ''):
-                print(line, end='')
-
-            process.wait()
-
-            if process.returncode != 0:
-                console.print(f"\n[red]Command failed with return code {process.returncode}[/red]")
-                return False
-            return True
-        except Exception as e:
-            console.print(f"[red]Failed to run {command}: {e}[/red]")
-            return False
+        return run_repo_command(command, self.top, self.dry_run)
 
     def reset_and_sync(self) -> bool:
         """Reset and sync the repo tree."""
@@ -405,27 +290,7 @@ class UpstreamMerger:
 
     def generate_manifest(self) -> Path:
         """Generate temporary manifest file."""
-        manifest_path = self.top / "full-manifest.xml"
-
-        try:
-            if self.dry_run:
-                console.print("[blue][DRY RUN] Generating temporary manifest for analysis[/blue]")
-
-            result = subprocess.run(
-                ["repo", "manifest"],
-                cwd=self.top,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            with open(manifest_path, 'w') as f:
-                f.write(result.stdout)
-
-            return manifest_path
-        except subprocess.CalledProcessError as e:
-            console.print(f"[red]Failed to generate manifest: {e}[/red]")
-            raise
+        return generate_manifest(self.top, self.dry_run)
 
     def parse_projects_with_upstream(self, manifest_path: Path) -> List[MergeTask]:
         """Parse projects with upstream configuration from manifest."""
@@ -606,14 +471,7 @@ class UpstreamMerger:
         if not successful_merges and not failed_merges:
             return
 
-        def truncate_project_name(name: str, max_len: int = 45) -> str:
-            """Truncate project name with ellipsis in the middle."""
-            if len(name) <= max_len:
-                return name
-
-            # Calculate how many chars to show on each side
-            side_len = (max_len - 1) // 2  # -1 for the ellipsis character
-            return f"{name[:side_len]}…{name[-side_len:]}"
+        # truncate_project_name function is now imported from xos_common
 
         # Display successful merges
         if successful_merges:
@@ -728,12 +586,7 @@ class UpstreamMerger:
                 push_successes, push_failures = self.execute_pushes(successful_merges)
 
         # Clean up temporary manifest
-        if not self.dry_run and manifest_path.exists():
-            try:
-                manifest_path.unlink()
-                console.print("[cyan]Deleted temporary manifest file[/cyan]")
-            except Exception as e:
-                console.print(f"[yellow]Warning: Failed to delete manifest file: {e}[/yellow]")
+        cleanup_manifest(manifest_path, self.dry_run)
 
         # Summary
         console.print("\n" + "=" * 60)

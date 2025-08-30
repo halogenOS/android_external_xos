@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 
 import os
+import sys
+import signal
+import subprocess
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass
 import git
 from github import Github, GithubException
+from rich.console import Console
 
 @dataclass
 class GitRemote:
@@ -353,3 +358,186 @@ def create_github_repo(repo_name: str, github_token: str) -> bool:
     except Exception as e:
         print(f"Failed to create GitHub repository {repo_name}: {e}")
         return False
+
+# Global console for shared use
+console = Console()
+
+def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
+    """Handle Git LFS cleanup (equivalent to unLFS function)."""
+    try:
+        repo = git.Repo(repo_path)
+
+        # Check if LFS is present
+        lfsconfig_exists = (repo_path / ".lfsconfig").exists()
+        gitattributes_has_lfs = False
+
+        gitattributes_path = repo_path / ".gitattributes"
+        if gitattributes_path.exists():
+            with open(gitattributes_path, 'r') as f:
+                gitattributes_has_lfs = 'merge=lfs' in f.read()
+
+        if not (lfsconfig_exists or gitattributes_has_lfs):
+            return True, "no LFS detected"
+
+        if dry_run:
+            return True, "would handle LFS cleanup (dry run)"
+
+        # Equivalent of the shell script unLFS function
+        commands = [
+            ["git", "lfs", "install"],
+            ["git", "lfs", "fetch"],
+            ["git", "lfs", "checkout"]
+        ]
+
+        # Run LFS commands
+        for cmd in commands:
+            try:
+                subprocess.run(cmd, cwd=repo_path, check=False, capture_output=True, text=True)
+            except Exception:
+                pass  # Ignore errors, just like the shell script with || :
+
+        # Get LFS files
+        result = subprocess.run(
+            ["git", "lfs", "ls-files"],
+            cwd=repo_path,
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            lfs_files = []
+            for line in result.stdout.strip().split('\n'):
+                parts = line.split()
+                if len(parts) >= 3:
+                    lfs_files.append(parts[2])
+
+            if lfs_files:
+                # Remove from cache and untrack
+                for lfs_file in lfs_files:
+                    subprocess.run(["git", "rm", "--cached", lfs_file], cwd=repo_path, check=False, capture_output=True)
+                    subprocess.run(["git", "lfs", "untrack", lfs_file], cwd=repo_path, check=False, capture_output=True)
+
+        # Remove LFS config files
+        for config_file in [".gitattributes", ".lfsconfig"]:
+            config_path = repo_path / config_file
+            if config_path.exists():
+                config_path.unlink()
+
+        # Stage and commit removal
+        repo.index.add([".gitattributes", ".lfsconfig"])
+        try:
+            repo.index.commit("Un-LFS")
+        except Exception:
+            pass  # Ignore if nothing to commit
+
+        # Uninstall LFS
+        subprocess.run(["git", "lfs", "uninstall"], cwd=repo_path, check=False, capture_output=True)
+
+        # Add LFS files directly
+        if lfs_files:
+            for lfs_file in lfs_files:
+                repo.index.add([lfs_file])
+
+        repo.index.add_all()
+        try:
+            repo.index.commit("Directly checkout LFS files")
+        except Exception:
+            pass  # Ignore if nothing to commit
+
+        return True, "LFS cleanup completed"
+
+    except Exception as e:
+        return False, f"LFS cleanup failed: {str(e)}"
+
+def run_repo_command(command: str, cwd: Path, dry_run: bool = False) -> bool:
+    """Run a repo command in the specified directory."""
+    if dry_run:
+        console.print(f"[blue][DRY RUN] Would run: {command}[/blue]")
+        return True
+
+    try:
+        # Use Popen for real-time output streaming
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        # Stream output in real-time
+        for line in iter(process.stdout.readline, ''):
+            print(line, end='')
+
+        process.wait()
+
+        if process.returncode != 0:
+            console.print(f"\n[red]Command failed with return code {process.returncode}[/red]")
+            return False
+        return True
+    except Exception as e:
+        console.print(f"[red]Failed to run {command}: {e}[/red]")
+        return False
+
+def safe_get_remote(repo: git.Repo, remote_name: str) -> Optional[git.Remote]:
+    """Safely get a remote from a repo, returning None if it doesn't exist."""
+    try:
+        if remote_name in [remote.name for remote in repo.remotes]:
+            return repo.remote(remote_name)
+        return None
+    except Exception:
+        return None
+
+def safe_add_or_update_remote(repo: git.Repo, remote_name: str, url: str) -> git.Remote:
+    """Safely add or update a remote in a repository."""
+    existing_remote = safe_get_remote(repo, remote_name)
+    if existing_remote:
+        if existing_remote.url != url:
+            existing_remote.set_url(url)
+        return existing_remote
+    else:
+        return repo.create_remote(remote_name, url)
+
+def generate_manifest(top: Path, dry_run: bool = False) -> Path:
+    """Generate temporary manifest file."""
+    manifest_path = top / "full-manifest.xml"
+
+    try:
+        if dry_run:
+            console.print("[blue][DRY RUN] Generating temporary manifest for analysis[/blue]")
+
+        result = subprocess.run(
+            ["repo", "manifest"],
+            cwd=top,
+            capture_output=True,
+            text=True,
+            check=True
+        )
+
+        with open(manifest_path, 'w') as f:
+            f.write(result.stdout)
+
+        return manifest_path
+    except subprocess.CalledProcessError as e:
+        console.print(f"[red]Failed to generate manifest: {e}[/red]")
+        raise
+
+def cleanup_manifest(manifest_path: Path, dry_run: bool = False):
+    """Clean up temporary manifest file."""
+    if not dry_run and manifest_path.exists():
+        try:
+            manifest_path.unlink()
+            console.print("[cyan]Deleted temporary manifest file[/cyan]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Failed to delete manifest file: {e}[/yellow]")
+
+def truncate_project_name(name: str, max_len: int = 45) -> str:
+    """Truncate project name with ellipsis in the middle for table display."""
+    if len(name) <= max_len:
+        return name
+    
+    side_len = (max_len - 1) // 2
+    return f"{name[:side_len]}…{name[-side_len:]}"

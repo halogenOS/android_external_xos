@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
-from rich.console import Console
 from rich.table import Table
 from dataclasses import dataclass
 import threading
@@ -28,10 +27,14 @@ from xos_common import (
     ManifestParser,
     GitOperations,
     get_android_top,
-    ProjectInfo
+    ProjectInfo,
+    console,
+    handle_lfs_cleanup,
+    safe_add_or_update_remote,
+    generate_manifest,
+    cleanup_manifest,
+    truncate_project_name
 )
-
-console = Console()
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -70,92 +73,7 @@ class SplineResult:
     created_repo: bool = False
     had_lfs: bool = False
 
-def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, str]:
-    """Handle Git LFS cleanup (equivalent to unLFS function)."""
-    try:
-        repo = git.Repo(repo_path)
-
-        # Check if LFS is present
-        lfsconfig_exists = (repo_path / ".lfsconfig").exists()
-        gitattributes_has_lfs = False
-
-        gitattributes_path = repo_path / ".gitattributes"
-        if gitattributes_path.exists():
-            with open(gitattributes_path, 'r') as f:
-                gitattributes_has_lfs = 'merge=lfs' in f.read()
-
-        if not (lfsconfig_exists or gitattributes_has_lfs):
-            return True, "no LFS detected"
-
-        if dry_run:
-            return True, "would handle LFS cleanup (dry run)"
-
-        # Equivalent of the shell script unLFS function
-        commands = [
-            ["git", "lfs", "install"],
-            ["git", "lfs", "fetch"],
-            ["git", "lfs", "checkout"]
-        ]
-
-        # Run LFS commands
-        for cmd in commands:
-            try:
-                subprocess.run(cmd, cwd=repo_path, check=False, capture_output=True, text=True)
-            except Exception:
-                pass  # Ignore errors, just like the shell script with || :
-
-        # Get LFS files
-        result = subprocess.run(
-            ["git", "lfs", "ls-files"],
-            cwd=repo_path,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode == 0 and result.stdout.strip():
-            lfs_files = []
-            for line in result.stdout.strip().split('\n'):
-                parts = line.split()
-                if len(parts) >= 3:
-                    lfs_files.append(parts[2])
-
-            if lfs_files:
-                # Remove from cache and untrack
-                for lfs_file in lfs_files:
-                    subprocess.run(["git", "rm", "--cached", lfs_file], cwd=repo_path, check=False, capture_output=True)
-                    subprocess.run(["git", "lfs", "untrack", lfs_file], cwd=repo_path, check=False, capture_output=True)
-
-        # Remove LFS config files
-        for config_file in [".gitattributes", ".lfsconfig"]:
-            config_path = repo_path / config_file
-            if config_path.exists():
-                config_path.unlink()
-
-        # Stage and commit removal
-        repo.index.add([".gitattributes", ".lfsconfig"])
-        try:
-            repo.index.commit("Un-LFS")
-        except Exception:
-            pass  # Ignore if nothing to commit
-
-        # Uninstall LFS
-        subprocess.run(["git", "lfs", "uninstall"], cwd=repo_path, check=False, capture_output=True)
-
-        # Add LFS files directly
-        if lfs_files:
-            for lfs_file in lfs_files:
-                repo.index.add([lfs_file])
-
-        repo.index.add_all()
-        try:
-            repo.index.commit("Directly checkout LFS files")
-        except Exception:
-            pass  # Ignore if nothing to commit
-
-        return True, "LFS cleanup completed"
-
-    except Exception as e:
-        return False, f"LFS cleanup failed: {str(e)}"
+# LFS cleanup function is now imported from xos_common
 
 def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos: bool) -> SplineResult:
     """Perform spline reticulation for a single project."""
@@ -248,15 +166,9 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
         xos_url = f"https://git.halogenos.org/halogenOS/{task.project.name}"
         xos_push_url = f"git@git.halogenos.org:halogenOS/{task.project.name}"
         
-        if 'XOS' in [remote.name for remote in repo.remotes]:
-            xos_remote = repo.remote('XOS')
-            xos_remote.set_url(xos_url)
-            # Set push URL using git command directly
-            repo.git.remote('set-url', '--push', 'XOS', xos_push_url)
-        else:
-            xos_remote = repo.create_remote('XOS', xos_url)
-            # Set push URL using git command directly
-            repo.git.remote('set-url', '--push', 'XOS', xos_push_url)
+        xos_remote = safe_add_or_update_remote(repo, 'XOS', xos_url)
+        # Set push URL using git command directly
+        repo.git.remote('set-url', '--push', 'XOS', xos_push_url)
 
         # Check if target branch already exists on remote
         try:
@@ -273,11 +185,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
             pass
 
         # Set up upstream remote
-        if 'upstream' in [remote.name for remote in repo.remotes]:
-            upstream_remote = repo.remote('upstream')
-            upstream_remote.set_url(task.upstream_url)
-        else:
-            upstream_remote = repo.create_remote('upstream', task.upstream_url)
+        upstream_remote = safe_add_or_update_remote(repo, 'upstream', task.upstream_url)
 
         # Fetch from upstream
         console.print(f"[cyan]{project_name}:[/cyan] Fetching upstream")
@@ -378,27 +286,7 @@ class SplineReticulator:
 
     def generate_manifest(self) -> Path:
         """Generate temporary manifest file."""
-        manifest_path = self.top / "full-manifest.xml"
-
-        try:
-            if self.dry_run:
-                console.print("[blue][DRY RUN] Generating temporary manifest for analysis[/blue]")
-            
-            result = subprocess.run(
-                ["repo", "manifest"],
-                cwd=self.top,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-
-            with open(manifest_path, 'w') as f:
-                f.write(result.stdout)
-
-            return manifest_path
-        except subprocess.CalledProcessError as e:
-            console.print(f"[red]Failed to generate manifest: {e}[/red]")
-            raise
+        return generate_manifest(self.top, self.dry_run)
 
     def parse_spline_tasks(self, manifest_path: Path) -> List[SplineTask]:
         """Parse projects that need spline reticulation."""
@@ -574,13 +462,7 @@ class SplineReticulator:
         if not successful_results and not failed_results:
             return
 
-        def truncate_project_name(name: str, max_len: int = 45) -> str:
-            """Truncate project name with ellipsis in the middle."""
-            if len(name) <= max_len:
-                return name
-            
-            side_len = (max_len - 1) // 2
-            return f"{name[:side_len]}…{name[-side_len:]}"
+        # truncate_project_name function is now imported from xos_common
 
         # Display successful reticulations
         if successful_results:
@@ -714,12 +596,7 @@ class SplineReticulator:
         self.display_spline_results(successful_results, failed_results)
 
         # Clean up temporary manifest
-        if not self.dry_run and manifest_path.exists():
-            try:
-                manifest_path.unlink()
-                console.print("[cyan]Deleted temporary manifest file[/cyan]")
-            except Exception as e:
-                console.print(f"[yellow]Warning: Failed to delete manifest file: {e}[/yellow]")
+        cleanup_manifest(manifest_path, self.dry_run)
 
         # Summary
         console.print("\n" + "=" * 60)

@@ -7,7 +7,6 @@ import argparse
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
-from rich.console import Console
 from rich.live import Live
 from rich.table import Table
 from typing import Tuple, List, Dict, Optional
@@ -17,10 +16,9 @@ import threading
 
 from xos_common import (
     get_android_top, get_project_path, ManifestParser,
-    GitOperations, ProjectInfo, get_github_token, create_github_repo
+    GitOperations, ProjectInfo, get_github_token, create_github_repo,
+    console
 )
-
-console = Console()
 
 # Global executor for signal handling
 executor = None
