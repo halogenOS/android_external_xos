@@ -207,7 +207,12 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
             upstream_remote.fetch()
 
             # Merge with no-rebase and no-edit (equivalent to --no-rebase --no-edit)
-            merge_target = f"upstream/{upstream_rev}"
+            if task.upstream_config.is_tag_or_commit:
+                # Direct reference to tag or commit
+                merge_target = upstream_rev
+            else:
+                # Branch reference
+                merge_target = f"upstream/{upstream_rev}"
             repo.git.merge(merge_target, no_edit=True)
 
         except git.exc.GitCommandError as e:
@@ -567,8 +572,52 @@ class UpstreamMerger:
             console.print(f"[red]Failed to prepare merge tasks: {e}[/red]")
             return 1
 
-        # Process merges
-        successful_merges, failed_merges = self.process_merges(tasks)
+        # Process merges (skip if push-only mode)
+        if self.push_only:
+            console.print(f"[blue]Push-only mode: Assuming all {len(tasks)} projects are already merged[/blue]")
+            successful_merges = []
+            failed_merges = []
+            
+            # Create successful merge results for all tasks
+            for task in tasks:
+                project_name = task.project.path
+                project_path = task.project_path
+                target_branch = task.short_revision
+                
+                if not project_path.exists():
+                    continue
+                
+                try:
+                    repo = git.Repo(project_path)
+                    
+                    # Check if local HEAD is different from remote HEAD
+                    try:
+                        local_head = repo.head.commit.hexsha
+                        remote_ref = f"{task.repo_remote}/{target_branch}"
+                        remote_head = repo.commit(remote_ref).hexsha
+                        
+                        if local_head == remote_head:
+                            # Skip repos that are already up to date
+                            continue
+                            
+                    except git.exc.GitCommandError:
+                        # Remote ref doesn't exist, assume we need to push
+                        pass
+                    
+                    push_cmd = f"git push XOS HEAD:{target_branch}"
+                    successful_merges.append(MergeResult(
+                        project_name,
+                        True,
+                        "assumed merged (push-only mode)",
+                        needs_push=True,
+                        push_command=push_cmd
+                    ))
+                    
+                except Exception:
+                    # Skip projects that can't be processed
+                    continue
+        else:
+            successful_merges, failed_merges = self.process_merges(tasks)
 
         # Display results in table format
         self.display_merge_results(successful_merges, failed_merges)
