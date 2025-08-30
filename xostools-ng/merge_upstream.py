@@ -247,11 +247,11 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
             )
 
         # Add/update upstream remote
-        try:
+        if 'upstream' in [remote.name for remote in repo.remotes]:
             upstream_remote = repo.remote('upstream')
             if upstream_remote.url != upstream_url:
                 upstream_remote.set_url(upstream_url)
-        except git.exc.InvalidGitRepositoryError:
+        else:
             repo.create_remote('upstream', upstream_url)
 
         # Check if shallow and unshallow if needed
@@ -286,7 +286,10 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
         # Perform the merge
         try:
             # Fetch from upstream
-            upstream_remote = repo.remote('upstream')
+            if 'upstream' in [remote.name for remote in repo.remotes]:
+                upstream_remote = repo.remote('upstream')
+            else:
+                return MergeResult(project_name, False, "upstream remote not found")
             upstream_remote.fetch()
 
             # Merge with no-rebase and no-edit (equivalent to --no-rebase --no-edit)

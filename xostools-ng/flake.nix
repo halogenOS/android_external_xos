@@ -112,6 +112,31 @@
           meta.mainProgram = pname;
         };
 
+        # Reticulate splines script as a Python application
+        reticulate-splines = python3Packages.buildPythonApplication rec {
+          pname = "reticulate-splines";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            gitpython
+            lxml
+            rich
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp reticulate_splines.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Development shell
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -142,6 +167,7 @@
             echo "  python mirror_all.py        - Mirror repositories"
             echo "  python create_snapshot.py   - Create snapshot tags"
             echo "  python merge_upstream.py    - Merge upstream changes"
+            echo "  python reticulate_splines.py - Reticulate splines (create branches from upstream)"
             echo ""
             echo "Make sure TOP is set and build/envsetup.sh is sourced"
           '';
@@ -154,6 +180,7 @@
           mirror-all = mirror-all;
           create-snapshot = create-snapshot;
           merge-upstream = merge-upstream;
+          reticulate-splines = reticulate-splines;
           xos-common = xos-common;
         };
 
@@ -173,6 +200,10 @@
           merge-upstream = {
             type = "app";
             program = lib.getExe merge-upstream;
+          };
+          reticulate-splines = {
+            type = "app";
+            program = lib.getExe reticulate-splines;
           };
         };
 
