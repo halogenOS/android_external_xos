@@ -162,6 +162,10 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
 
         repo = git.Repo(project_path)
 
+        # Check for unstaged changes and untracked files before proceeding
+        if repo.is_dirty(untracked_files=True):
+            return SplineResult(project_name, False, "repository has unstaged changes or untracked files, cannot proceed")
+
         # Set up XOS remote
         xos_url = f"https://git.halogenos.org/halogenOS/{task.project.name}"
         xos_push_url = f"git@git.halogenos.org:halogenOS/{task.project.name}"
@@ -248,6 +252,12 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
             console.print(f"[cyan]{project_name}:[/cyan] Handling LFS cleanup")
             lfs_success, lfs_msg = handle_lfs_cleanup(project_path, dry_run=False)  # dry_run is False here since we're in execution mode
             if not lfs_success:
+                # Cleanup repository on LFS failure
+                try:
+                    console.print(f"[yellow]{project_name}:[/yellow] Cleaning up repository after LFS failure")
+                    repo.git.reset("--hard")
+                except Exception:
+                    pass  # Ignore cleanup errors
                 return SplineResult(project_name, False, f"spline reticulation succeeded but LFS cleanup failed: {lfs_msg}")
 
         # Push to XOS
@@ -265,6 +275,14 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
         )
 
     except Exception as e:
+        # Cleanup repository on any failure
+        try:
+            if project_path.exists() and (project_path / ".git").exists():
+                repo = git.Repo(project_path)
+                console.print(f"[yellow]{project_name}:[/yellow] Cleaning up repository after failure")
+                repo.git.reset("--hard")
+        except Exception:
+            pass  # Ignore cleanup errors
         return SplineResult(project_name, False, f"unexpected error: {str(e)}")
 
 class SplineReticulator:

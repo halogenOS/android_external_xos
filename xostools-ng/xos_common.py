@@ -424,8 +424,32 @@ def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, st
                 config_path.unlink()
 
         # Stage and commit removal
-        repo.index.add([".gitattributes", ".lfsconfig"])
         try:
+            # Use git.index.remove() for deleted files instead of add()
+            files_to_remove = []
+            if not (repo_path / ".gitattributes").exists():
+                files_to_remove.append(".gitattributes")
+            if not (repo_path / ".lfsconfig").exists():
+                files_to_remove.append(".lfsconfig")
+            
+            if files_to_remove:
+                # Stage the removal of deleted files
+                for file in files_to_remove:
+                    try:
+                        repo.index.remove([file])
+                    except Exception:
+                        pass  # File might not be in index
+            
+            # Add any existing files
+            existing_files = []
+            if (repo_path / ".gitattributes").exists():
+                existing_files.append(".gitattributes")
+            if (repo_path / ".lfsconfig").exists():
+                existing_files.append(".lfsconfig")
+            
+            if existing_files:
+                repo.index.add(existing_files)
+                
             repo.index.commit("Un-LFS")
         except Exception:
             pass  # Ignore if nothing to commit
@@ -433,16 +457,13 @@ def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, st
         # Uninstall LFS
         subprocess.run(["git", "lfs", "uninstall"], cwd=repo_path, check=False, capture_output=True)
 
-        # Add LFS files directly
+        # Add LFS files directly (equivalent to final part of shell script)
         if lfs_files:
-            for lfs_file in lfs_files:
-                repo.index.add([lfs_file])
-
-        repo.index.add_all()
-        try:
-            repo.index.commit("Directly checkout LFS files")
-        except Exception:
-            pass  # Ignore if nothing to commit
+            try:
+                repo.index.add(lfs_files)
+                repo.index.commit("Directly checkout LFS files")
+            except Exception:
+                pass  # Ignore if nothing to commit
 
         return True, "LFS cleanup completed"
 
