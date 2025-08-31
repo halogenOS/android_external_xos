@@ -171,8 +171,12 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
 
         # Check if shallow and unshallow if needed
         if GitOperations.is_shallow_repo(project_path):
-            if not GitOperations.unshallow_repo(project_path):
-                return MergeResult(project_name, False, "failed to unshallow repository")
+            try:
+                repo = git.Repo(project_path)
+                # Unshallow from the XOS remote specifically
+                repo.git.fetch("XOS", "--unshallow")
+            except Exception as e:
+                return MergeResult(project_name, False, f"failed to unshallow repository: {str(e)}")
 
         # Ensure we're on the correct branch
         try:
