@@ -150,6 +150,9 @@
             requests
             beautifulsoup4
             lxml
+            gitpython
+            rich
+            xos-common
           ];
 
           installPhase = ''
@@ -165,7 +168,7 @@
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
             git
-            repo
+            git-repo
             xmlstarlet
           ] ++ (with python3Packages; [
             python

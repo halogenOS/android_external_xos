@@ -321,9 +321,21 @@ class GitOperations:
 
 def get_android_top() -> Path:
     """Get the Android build tree top directory."""
-    top = os.environ.get('TOP')
-    if not top:
-        raise RuntimeError("TOP environment variable not set. Source build/envsetup.sh first.")
+    # First try environment variables
+    top = os.environ.get('TOP') or os.environ.get('ANDROID_BUILD_TOP')
+    if top:
+        return Path(top)
+
+    # Walk up the directory tree looking for .repo
+    current_dir = Path.cwd()
+    while current_dir != Path('/'):
+        repo_dir = current_dir / '.repo'
+        if repo_dir.exists() and repo_dir.is_dir():
+            return current_dir
+        current_dir = current_dir.parent
+
+    # If we reach here, we didn't find .repo
+    raise RuntimeError("Cannot find Android source tree. Either set TOP/ANDROID_BUILD_TOP environment variable or run from within Android source tree.")
     return Path(top)
 
 def get_project_path(path: str) -> str:
