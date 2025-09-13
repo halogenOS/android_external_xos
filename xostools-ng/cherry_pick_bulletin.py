@@ -88,7 +88,107 @@ class CherryPickResult:
     used_existing_branch: bool = False
 
 
-def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picker: 'BulletinCherryPicker' = None) -> CherryPickResult:
+def setup_progress_bar(total_tasks: int, dry_run: bool, console):
+    """Setup and return progress bar with main progress bar."""
+    dry_run_prefix = "[DRY RUN] " if dry_run else ""
+
+    progress = Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console
+    )
+
+    # Main progress bar
+    pick_task = progress.add_task(
+        f"[cyan]Cherry-picking patches {dry_run_prefix.strip()}",
+        total=total_tasks
+    )
+
+    return progress, pick_task
+
+
+def group_tasks_by_repository(tasks):
+    """Group tasks by repository to ensure serial execution within each repo."""
+    repo_buckets = {}
+    for task in tasks:
+        repo_path = task.project_mapping.local_path
+        if repo_path not in repo_buckets:
+            repo_buckets[repo_path] = []
+        repo_buckets[repo_path].append(task)
+    return repo_buckets
+
+
+def process_repo_bucket(repo_path, repo_tasks, dry_run, cherry_picker, progress, pick_task, stop_event):
+    """Process all tasks for a single repository sequentially."""
+    # Create a progress bar for this specific repository bucket
+    bucket_task = progress.add_task(
+        f"[dim]Starting {repo_path}...",
+        total=len(repo_tasks)
+    )
+
+    bucket_results = []
+    for i, task in enumerate(repo_tasks):
+        if stop_event.is_set():
+            break
+
+        try:
+            result = perform_single_cherry_pick(task, dry_run, cherry_picker, progress, bucket_task)
+            bucket_results.append(result)
+        except Exception as e:
+            failed_result = CherryPickResult(
+                task.project_mapping.local_path,
+                task.patch_info['ref'],
+                task.patch_info['url'],
+                False,
+                f"exception: {str(e)}"
+            )
+            bucket_results.append(failed_result)
+
+        # Update both main progress and bucket progress
+        progress.update(pick_task, advance=1)
+        progress.update(bucket_task, advance=1)
+
+    # Remove the bucket progress bar when done
+    progress.remove_task(bucket_task)
+
+    return bucket_results
+
+
+def submit_cherry_pick_buckets(executor_pool, repo_buckets, dry_run, cherry_picker, progress, pick_task, stop_event):
+    """Submit repository buckets to the executor pool."""
+    return {
+        executor_pool.submit(process_repo_bucket, repo_path, repo_tasks, dry_run, cherry_picker, progress, pick_task, stop_event): repo_path
+        for repo_path, repo_tasks in repo_buckets.items()
+    }
+
+
+def process_completed_bucket_futures(futures, progress, stop_event, successful_picks, failed_picks, console):
+    """Process completed bucket futures and update results."""
+    for future in as_completed(futures):
+        if stop_event.is_set():
+            break
+
+        try:
+            repo_path = futures[future]
+            bucket_results = future.result()
+
+            # Process all results from this bucket
+            for result in bucket_results:
+                if result.success:
+                    successful_picks.append(result)
+                else:
+                    failed_picks.append(result)
+
+        except Exception as e:
+            repo_path = futures[future]
+            # Handle bucket-level exceptions - could affect multiple tasks
+            console.print(f"[red]Exception processing repository bucket {repo_path}: {str(e)}[/red]")
+
+
+def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picker: 'BulletinCherryPicker' = None, progress=None, bucket_task=None) -> CherryPickResult:
     """Perform cherry-pick operation for a single patch."""
     mapping = task.project_mapping
     patch_info = task.patch_info
@@ -163,32 +263,32 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
             # Determine the target branch
             used_existing_branch = False
             if onto and (security_patch_level or branch_name):
-                # Parse onto parameter for remote/ref format
-                onto_remote = None
-                onto_ref = onto
-                if '/' in onto:
-                    parts = onto.split('/', 1)
-                    onto_remote = parts[0]
-                    onto_ref = parts[1]
+                # Parse onto parameter - remote/ref format is required
+                if '/' not in onto:
+                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"--onto parameter must be in format 'remote/ref', got: {onto}")
 
-                    # Ensure the remote exists and is added
-                    try:
-                        if onto_remote == 'aosp':
-                            # Ensure AOSP remote exists
-                            remote_obj = ensure_aosp_remote(repo, mapping.aosp_name)
-                        else:
-                            # Try to get the remote
-                            remote_obj = safe_get_remote(repo, onto_remote)
-                            if not remote_obj:
-                                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"remote '{onto_remote}' not found for onto parameter")
+                parts = onto.split('/', 1)
+                onto_remote = parts[0]
+                onto_ref = parts[1]
 
-                        # Fetch from the remote to ensure we have the ref
-                        remote_obj.fetch()
-                    except Exception as e:
-                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to fetch from remote '{onto_remote}': {str(e)}")
+                # Ensure the remote exists and is added
+                try:
+                    if onto_remote == 'aosp':
+                        # Ensure AOSP remote exists
+                        remote_obj = ensure_aosp_remote(repo, mapping.aosp_name)
+                    else:
+                        # Try to get the remote
+                        remote_obj = safe_get_remote(repo, onto_remote)
+                        if not remote_obj:
+                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"remote '{onto_remote}' not found for onto parameter")
 
-                # Use custom branch name if provided, otherwise generate ASB branch name
-                base_onto_ref = onto_ref if onto_remote else onto
+                    # Fetch the specific ref from the remote to ensure we have it
+                    remote_obj.fetch(refspec=f"{onto_ref}:{onto_ref}")
+                except Exception as e:
+                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to fetch from remote '{onto_remote}': {str(e)}")
+
+                # Use custom branch name if provided, otherwise generate ASB branch name using only the ref part
+                base_onto_ref = onto_ref
                 target_branch_name = branch_name if branch_name else f"{base_onto_ref}-ASB-{security_patch_level}"
 
                 try:
@@ -245,11 +345,19 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
             # Perform the cherry-pick
             try:
+                # Update bucket progress to show fetching
+                if progress and bucket_task:
+                    progress.update(bucket_task, description=f"[yellow]Fetching {mapping.local_path} ({patch_ref[:12]})")
+
                 # Fetch from AOSP to get the commit
                 aosp_remote = safe_get_remote(repo, 'aosp')
                 if not aosp_remote:
                     return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "aosp remote not found")
                 aosp_remote.fetch()
+
+                # Update bucket progress to show cherry-picking
+                if progress and bucket_task:
+                    progress.update(bucket_task, description=f"[green]Cherry-picking {mapping.local_path} ({patch_ref[:12]})")
 
                 # Check if commit already exists in current branch
                 try:
@@ -416,11 +524,17 @@ class BulletinCherryPicker:
                 tasks.append(task)
 
         if unmatched_patches:
-            console.print(f"[yellow]Warning: No local projects found for {len(unmatched_patches)} patches:[/yellow]")
-            for repo_name in unmatched_patches[:5]:  # Show first 5
+            # Remove duplicates while preserving order
+            unique_unmatched = []
+            seen = set()
+            for repo_name in unmatched_patches:
+                if repo_name not in seen:
+                    unique_unmatched.append(repo_name)
+                    seen.add(repo_name)
+
+            console.print(f"[yellow]Warning: No local projects found for {len(unique_unmatched)} patches:[/yellow]")
+            for repo_name in unique_unmatched:
                 console.print(f"  [yellow]- {repo_name}[/yellow]")
-            if len(unmatched_patches) > 5:
-                console.print(f"  [yellow]... and {len(unmatched_patches) - 5} more[/yellow]")
 
         return tasks
 
@@ -495,52 +609,26 @@ class BulletinCherryPicker:
         successful_picks = []
         failed_picks = []
 
+        # Setup progress bar
+        progress, pick_task = setup_progress_bar(len(tasks), self.dry_run, console)
+
+        # Group tasks by repository
+        repo_buckets = group_tasks_by_repository(tasks)
+
         # Process with progress bar and threading
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            console=console
-        ) as progress:
-
-            pick_task = progress.add_task(
-                f"[cyan]Cherry-picking patches {dry_run_prefix.strip()}",
-                total=len(tasks)
-            )
-
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor_pool:
-                executor = executor_pool
-
-                # Submit all tasks
-                futures = {
-                    executor_pool.submit(perform_single_cherry_pick, task, self.dry_run, self): task
-                    for task in tasks
-                }
+        with progress:
+            # Limit workers to number of repository buckets to avoid over-threading
+            max_workers = min(self.max_workers, len(repo_buckets))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor_pool:
+                # Submit repository buckets
+                futures = submit_cherry_pick_buckets(executor_pool, repo_buckets, self.dry_run, self, progress, pick_task, stop_event)
 
                 # Process results as they complete
-                for future in as_completed(futures):
-                    if stop_event.is_set():
-                        executor_pool.shutdown(wait=False, cancel_futures=True)
-                        break
+                process_completed_bucket_futures(futures, progress, stop_event, successful_picks, failed_picks, console)
 
-                    try:
-                        task = futures[future]
-                        result = future.result()
-
-                        if result.success:
-                            successful_picks.append(result)
-                        else:
-                            failed_picks.append(result)
-
-                        progress.update(pick_task, advance=1)
-
-                    except Exception as e:
-                        task = futures[future]
-                        failed_result = CherryPickResult(task.project_mapping.local_path, task.patch_info['ref'], task.patch_info['url'], False, f"exception: {str(e)}")
-                        failed_picks.append(failed_result)
-                        progress.update(pick_task, advance=1)
+                # Shutdown if stopped
+                if stop_event.is_set():
+                    executor_pool.shutdown(wait=False, cancel_futures=True)
 
         return successful_picks, failed_picks
 
@@ -686,10 +774,8 @@ class BulletinCherryPicker:
 
         if failed_picks:
             console.print(f"\n[red]Failed cherry-picks ({len(failed_picks)}):[/red]")
-            for result in failed_picks[:5]:  # Show first 5
+            for result in failed_picks:
                 console.print(f"  [red]- {result.project_path} ({result.patch_ref[:12]}):[/red] {result.message}")
-            if len(failed_picks) > 5:
-                console.print(f"  [red]... and {len(failed_picks) - 5} more failures[/red]")
 
         if push_failures:
             console.print(f"\n[red]Failed pushes ({len(push_failures)}):[/red]")
@@ -711,8 +797,8 @@ Examples:
   %(prog)s 2025-09-01 --android-version 15          # Cherry-pick patches for Android 15
   %(prog)s 2025-09-01 --android-version 16 --dry-run  # Show what would be cherry-picked
   %(prog)s 2025-09-01 --android-version 15 --push-only  # Only push existing cherry-picks
-  %(prog)s 2025-09-01 --android-version 15 --onto android-16.0.0_r1  # Auto-generated ASB branches
-  %(prog)s 2025-07-01 2025-08-01 --android-version 16 --onto android-16.0.0_r1 --branch-name android-16.0.0_r1-ASB_2025-08-01  # Custom branch name
+  %(prog)s 2025-09-01 --android-version 15 --onto aosp/android-16.0.0_r1  # Auto-generated ASB branches
+  %(prog)s 2025-07-01 2025-08-01 --android-version 16 --onto aosp/android-16.0.0_r1 --branch-name android-16.0.0_r1-ASB_2025-08-01  # Custom branch name
         """
     )
 
@@ -750,7 +836,7 @@ Examples:
     parser.add_argument(
         "--onto",
         type=str,
-        help="Create a new branch '<onto>-ASB-<security_patch_level>' and cherry-pick onto it"
+        help="Use specified remote/ref as base. Format: remote/ref (e.g., aosp/android-16.0.0_r1). Creates branch '<ref>-ASB-<security_patch_level>' unless --branch-name is specified."
     )
 
     parser.add_argument(

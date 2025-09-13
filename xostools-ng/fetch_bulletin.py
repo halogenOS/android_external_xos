@@ -177,7 +177,6 @@ def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
                     progress.update(commit_task, advance=1.0)
             except (git.exc.BadName, Exception):
                 # Commit not found locally, fetch it from the original URL
-                console.print(f"  [cyan]→[/cyan] Fetching {repo_name}:{commit_ref[:8]}...")
                 try:
                     # Extract the base repository URL (remove the commit part)
                     if '/+/' in repo_url:
