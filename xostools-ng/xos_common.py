@@ -25,6 +25,15 @@ class ProjectInfo:
     remote: Optional[str] = None
     revision: Optional[str] = None
 
+@dataclass
+class ProjectMapping:
+    """Mapping between AOSP repository and local project."""
+    local_path: str
+    local_name: str
+    aosp_name: str
+    remote: str
+    revision: str
+
 class ManifestParser:
     def __init__(self, manifest_path: Path):
         self.manifest_path = manifest_path
@@ -431,7 +440,7 @@ def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, st
                 files_to_remove.append(".gitattributes")
             if not (repo_path / ".lfsconfig").exists():
                 files_to_remove.append(".lfsconfig")
-            
+
             if files_to_remove:
                 # Stage the removal of deleted files
                 for file in files_to_remove:
@@ -439,17 +448,17 @@ def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, st
                         repo.index.remove([file])
                     except Exception:
                         pass  # File might not be in index
-            
+
             # Add any existing files
             existing_files = []
             if (repo_path / ".gitattributes").exists():
                 existing_files.append(".gitattributes")
             if (repo_path / ".lfsconfig").exists():
                 existing_files.append(".lfsconfig")
-            
+
             if existing_files:
                 repo.index.add(existing_files)
-                
+
             repo.index.commit("Un-LFS")
         except Exception:
             pass  # Ignore if nothing to commit
@@ -559,6 +568,166 @@ def truncate_project_name(name: str, max_len: int = 45) -> str:
     """Truncate project name with ellipsis in the middle for table display."""
     if len(name) <= max_len:
         return name
-    
+
     side_len = (max_len - 1) // 2
     return f"{name[:side_len]}…{name[-side_len:]}"
+
+
+def build_project_mappings(manifest_path: Path) -> Dict[str, ProjectMapping]:
+    """Build mapping from AOSP repository names to local project info."""
+    mappings = {}
+
+    top = get_android_top()
+    snippet_path = top / ".repo/manifests/snippets/XOS.xml"
+    aosp_snippet_path = top / ".repo/manifests/default.xml"
+
+    # Parse the generated manifest first to get all project info
+    manifest_tree = ET.parse(manifest_path)
+    manifest_root = manifest_tree.getroot()
+
+    # Get default remote and revision from manifest
+    default = manifest_root.find('default')
+    default_remote = default.get('remote', 'XOS') if default is not None else 'XOS'
+    rom_revision = os.environ.get('ROM_REVISION', 'XOS-16.0')
+    default_revision = default.get('revision', f'refs/heads/{rom_revision}') if default is not None else f'refs/heads/{rom_revision}'
+
+    # Build remotes map
+    remotes = {}
+    for remote in manifest_root.findall('remote'):
+        remote_name = remote.get('name')
+        remote_revision = remote.get('revision', default_revision)
+        remotes[remote_name] = remote_revision
+
+    # Parse XOS snippet to understand project attributes
+    xos_projects = {}
+    if snippet_path.exists():
+        xos_tree = ET.parse(snippet_path)
+        xos_root = xos_tree.getroot()
+        for project in xos_root.findall('project'):
+            path = project.get('path')
+            if path:
+                xos_projects[path] = project
+
+    # Parse AOSP manifest to understand AOSP repository names
+    aosp_projects = {}
+    if aosp_snippet_path.exists():
+        aosp_tree = ET.parse(aosp_snippet_path)
+        aosp_root = aosp_tree.getroot()
+        for project in aosp_root.findall('project'):
+            path = project.get('path')
+            name = project.get('name')
+            if path and name:
+                aosp_projects[path] = name
+
+    # Process all projects in manifest
+    for project in manifest_root.findall('project'):
+        path = project.get('path')
+        name = project.get('name')
+        remote = project.get('remote', default_remote)
+        revision = project.get('revision')
+
+        if not path or not name:
+            continue
+
+        if not revision:
+            revision = remotes.get(remote, default_revision)
+
+        short_revision = revision.replace('refs/heads/', '')
+
+        # Determine AOSP repository name
+        aosp_name = None
+
+        # First check if this project exists in XOS snippet
+        xos_project = xos_projects.get(path)
+        if xos_project is not None:
+            # Check if it has merge-aosp attribute
+            if xos_project.get('merge-aosp') == 'true':
+                # Get AOSP name from default.xml
+                aosp_name = aosp_projects.get(path)
+                if not aosp_name:
+                    # Fallback: construct from platform/ + path
+                    aosp_name = f"platform/{path}"
+
+        # If not found in XOS projects, check if it exists in AOSP manifest
+        if not aosp_name:
+            aosp_name = aosp_projects.get(path)
+
+        # If we have an AOSP name, create mapping
+        if aosp_name:
+            # Normalize AOSP name (remove platform/ prefix for matching)
+            normalized_aosp_name = aosp_name.replace('platform/', '') if aosp_name.startswith('platform/') else aosp_name
+
+            mapping = ProjectMapping(
+                local_path=path,
+                local_name=name,
+                aosp_name=aosp_name,
+                remote=remote,
+                revision=short_revision
+            )
+
+            # Store both with and without platform/ prefix for flexible matching
+            mappings[aosp_name] = mapping
+            mappings[normalized_aosp_name] = mapping
+
+            # Also store by local path for additional matching
+            mappings[path] = mapping
+
+    return mappings
+
+
+def find_matching_projects(patch_repo_name: str, project_mappings: Dict[str, ProjectMapping]) -> List[ProjectMapping]:
+    """Find local projects that match a patch repository name."""
+    matches = []
+
+    # Direct exact match
+    if patch_repo_name in project_mappings:
+        matches.append(project_mappings[patch_repo_name])
+        return matches
+
+    # Try without platform/ prefix
+    if patch_repo_name.startswith('platform/'):
+        clean_name = patch_repo_name[9:]  # Remove 'platform/'
+        if clean_name in project_mappings:
+            matches.append(project_mappings[clean_name])
+            return matches
+
+    # Try with platform/ prefix if not present
+    if not patch_repo_name.startswith('platform/'):
+        platform_name = f"platform/{patch_repo_name}"
+        if platform_name in project_mappings:
+            matches.append(project_mappings[platform_name])
+            return matches
+
+    # Path-based matching - check if repo name ends with any project path
+    for mapping in project_mappings.values():
+        if mapping in matches:  # Avoid duplicates
+            continue
+
+        # Check if patch repo name ends with the local path
+        if patch_repo_name.endswith(mapping.local_path):
+            matches.append(mapping)
+            continue
+
+        # Check if local path ends with part of patch repo name
+        if mapping.local_path in patch_repo_name:
+            matches.append(mapping)
+            continue
+
+    return matches
+
+
+def filter_patches_by_android_version(bulletin_data: List[Dict], android_version: str) -> List[Dict]:
+    """Filter patches that apply to the specified Android version."""
+    filtered_patches = []
+
+    for patch_level_data in bulletin_data:
+        for patch in patch_level_data.get('patches', []):
+            android_versions = patch.get('android_versions')
+            if android_versions is None:
+                # No version info, include all patches (e.g., kernel patches)
+                filtered_patches.append(patch)
+            elif isinstance(android_versions, list) and android_version in android_versions:
+                # Version matches
+                filtered_patches.append(patch)
+
+    return filtered_patches
