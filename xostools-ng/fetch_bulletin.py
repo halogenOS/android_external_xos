@@ -132,7 +132,6 @@ def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
         if progress and progress_task:
             # Add a sub-task for commit fetching
             commit_task = progress.add_task(f"[yellow]├─ Fetching {repo_name}:{commit_ref[:8]}", total=1)
-            progress.update(commit_task, advance=0.5)  # Show as in progress
 
         # Parse default.xml to find the local path
         default_xml = android_top / '.repo' / 'manifests' / 'default.xml'
@@ -175,9 +174,13 @@ def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
             try:
                 commit = repo.commit(commit_ref)
                 debug_print(f"[green]DEBUG: Found commit locally: {commit_ref[:8]}[/green]")
+                if progress and progress_task:
+                    progress.update(commit_task, advance=0.8, description=f"[green]├─ {repo_name}:{commit_ref[:8]} (local)")
             except (git.exc.BadName, Exception):
                 # Commit not found locally, fetch it from aosp remote
                 debug_print(f"[yellow]DEBUG: Commit not found locally, fetching {commit_ref[:8]} from aosp[/yellow]")
+                if progress and progress_task:
+                    progress.update(commit_task, advance=0.5, description=f"[cyan]├─ Fetching {repo_name}:{commit_ref[:8]}...")
                 try:
                     repo.git.fetch('aosp', commit_ref)
                     commit = repo.commit(commit_ref)
@@ -185,13 +188,14 @@ def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
                 except git.exc.GitCommandError as e:
                     debug_print(f"[red]DEBUG: Failed to fetch commit {commit_ref[:8]}: {e}[/red]")
                     if progress and progress_task:
+                        progress.update(commit_task, advance=1, description=f"[red]├─ {repo_name}:{commit_ref[:8]} ✗")
                         progress.remove_task(commit_task)
                     return None
 
             title, metadata, cherry_picked_from = parse_commit_message(commit.message)
 
             if progress and progress_task:
-                progress.update(commit_task, advance=0.5, description=f"[green]├─ Fetched {repo_name}:{commit_ref[:8]}")
+                progress.update(commit_task, advance=1, description=f"[green]├─ {repo_name}:{commit_ref[:8]} ✓")
                 progress.remove_task(commit_task)
 
             result = {
@@ -497,9 +501,9 @@ def extract_patches(html):
                     "security_patch_level": patch_level,
                     "patches": patches
                 })
-                progress.update(patch_level_task, description=f"[cyan]{patch_level}: {len(patches)} patches from {tables_found} tables")
+                progress.update(patch_level_task, description=f"[green]{patch_level}: {len(patches)} patches extracted")
             else:
-                progress.update(patch_level_task, description=f"[cyan]{patch_level}: No patches found")
+                progress.update(patch_level_task, description=f"[yellow]{patch_level}: No applicable patches")
 
             progress.update(patch_level_task, advance=1)
 
