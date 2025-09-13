@@ -173,29 +173,45 @@ def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
             commit = None
             try:
                 commit = repo.commit(commit_ref)
-                debug_print(f"[green]DEBUG: Found commit locally: {commit_ref[:8]}[/green]")
                 if progress and progress_task:
-                    progress.update(commit_task, advance=0.8, description=f"[green]├─ {repo_name}:{commit_ref[:8]} (local)")
+                    progress.update(commit_task, advance=1.0)
             except (git.exc.BadName, Exception):
-                # Commit not found locally, fetch it from aosp remote
-                debug_print(f"[yellow]DEBUG: Commit not found locally, fetching {commit_ref[:8]} from aosp[/yellow]")
-                if progress and progress_task:
-                    progress.update(commit_task, advance=0.5, description=f"[cyan]├─ Fetching {repo_name}:{commit_ref[:8]}...")
+                # Commit not found locally, fetch it from the original URL
+                console.print(f"  [cyan]→[/cyan] Fetching {repo_name}:{commit_ref[:8]}...")
                 try:
-                    repo.git.fetch('aosp', commit_ref)
+                    # Extract the base repository URL (remove the commit part)
+                    if '/+/' in repo_url:
+                        # Google source format: https://domain/repo/+/commit
+                        base_url = repo_url.split('/+/')[0]
+                    elif '/-/commit/' in repo_url:
+                        # GitLab format: https://domain/repo/-/commit/commit
+                        base_url = repo_url.split('/-/commit/')[0]
+                    elif '/commit/' in repo_url:
+                        # GitHub format: https://domain/repo/commit/commit
+                        base_url = repo_url.split('/commit/')[0]
+                    else:
+                        raise ValueError(f"Unknown URL format: {repo_url}")
+                    
+                    # Add .git if not present
+                    if not base_url.endswith('.git'):
+                        base_url += '.git'
+                    
+                    repo.git.fetch(base_url, commit_ref)
                     commit = repo.commit(commit_ref)
-                    debug_print(f"[green]DEBUG: Successfully fetched and found commit: {commit_ref[:8]}[/green]")
+                    if progress and progress_task:
+                        progress.update(commit_task, advance=1.0)
                 except git.exc.GitCommandError as e:
+                    error_msg = str(e).split('\n')[0] if '\n' in str(e) else str(e)
+                    console.print(f"  [red]✗[/red] {repo_name}:{commit_ref[:8]} ([red]{error_msg}[/red])")
                     debug_print(f"[red]DEBUG: Failed to fetch commit {commit_ref[:8]}: {e}[/red]")
                     if progress and progress_task:
-                        progress.update(commit_task, advance=1, description=f"[red]├─ {repo_name}:{commit_ref[:8]} ✗")
+                        progress.update(commit_task, advance=1.0)
                         progress.remove_task(commit_task)
                     return None
 
             title, metadata, cherry_picked_from = parse_commit_message(commit.message)
 
             if progress and progress_task:
-                progress.update(commit_task, advance=1, description=f"[green]├─ {repo_name}:{commit_ref[:8]} ✓")
                 progress.remove_task(commit_task)
 
             result = {
