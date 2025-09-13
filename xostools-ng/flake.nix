@@ -137,6 +137,30 @@
           meta.mainProgram = pname;
         };
 
+        # Fetch bulletin script as a Python application
+        fetch-bulletin = python3Packages.buildPythonApplication rec {
+          pname = "fetch-bulletin";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            requests
+            beautifulsoup4
+            lxml
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp fetch_bulletin.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Development shell
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -150,6 +174,8 @@
             lxml
             rich
             pygithub
+            requests
+            beautifulsoup4
             black
             flake8
             mypy
@@ -168,6 +194,7 @@
             echo "  python create_snapshot.py   - Create snapshot tags"
             echo "  python merge_upstream.py    - Merge upstream changes"
             echo "  python reticulate_splines.py - Reticulate splines (create branches from upstream)"
+            echo "  python fetch_bulletin.py    - Fetch Android security bulletins as JSON"
             echo ""
             echo "Make sure TOP is set and build/envsetup.sh is sourced"
           '';
@@ -181,6 +208,7 @@
           create-snapshot = create-snapshot;
           merge-upstream = merge-upstream;
           reticulate-splines = reticulate-splines;
+          fetch-bulletin = fetch-bulletin;
           xos-common = xos-common;
         };
 
@@ -204,6 +232,10 @@
           reticulate-splines = {
             type = "app";
             program = lib.getExe reticulate-splines;
+          };
+          fetch-bulletin = {
+            type = "app";
+            program = lib.getExe fetch-bulletin;
           };
         };
 
