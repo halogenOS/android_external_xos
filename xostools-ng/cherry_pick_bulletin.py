@@ -67,6 +67,7 @@ class CherryPickTask:
     patch_info: Dict[str, Any]
     onto: Optional[str] = None
     security_patch_level: Optional[str] = None
+    branch_name: Optional[str] = None
 
 @dataclass
 class CherryPickResult:
@@ -79,6 +80,7 @@ class CherryPickResult:
     needs_push: bool = False
     push_command: Optional[str] = None
     had_lfs: bool = False
+    used_existing_branch: bool = False
 
 
 def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPickResult:
@@ -89,6 +91,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPic
     patch_url = patch_info['url']
     onto = task.onto
     security_patch_level = task.security_patch_level
+    branch_name = task.branch_name
 
     project_path = get_android_top() / mapping.local_path
 
@@ -118,18 +121,18 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPic
                     gitattributes_has_lfs = 'merge=lfs' in f.read()
             lfs_info = " (has LFS - would cleanup)" if (lfsconfig_exists or gitattributes_has_lfs) else ""
 
-            # Add ASB branch info if applicable
-            asb_info = ""
-            if onto and security_patch_level:
-                asb_branch_name = f"{onto}-ASB-{security_patch_level}"
-                asb_info = f" onto ASB branch {asb_branch_name}"
+            # Add branch info if applicable
+            branch_info = ""
+            if onto and (security_patch_level or branch_name):
+                target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
+                branch_info = f" onto branch {target_branch_name}"
 
             return CherryPickResult(
                 mapping.local_path,
                 patch_ref,
                 patch_url,
                 True,
-                f"would cherry-pick {patch_ref[:12]} from {mapping.aosp_name}{asb_info}{shallow_info}{lfs_info}"
+                f"would cherry-pick {patch_ref[:12]} from {mapping.aosp_name}{branch_info}{shallow_info}{lfs_info}"
             )
 
         # Add/update AOSP remote
@@ -146,36 +149,38 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPic
                 return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to unshallow repository: {str(e)}")
 
         # Determine the target branch
-        if onto and security_patch_level:
-            # Create ASB branch name: <onto>-ASB-<security_patch_level>
-            asb_branch_name = f"{onto}-ASB-{security_patch_level}"
+        used_existing_branch = False
+        if onto and (security_patch_level or branch_name):
+            # Use custom branch name if provided, otherwise generate ASB branch name
+            target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
             
             try:
                 current_branch = repo.active_branch.name
             except TypeError:
                 current_branch = None
 
-            if current_branch != asb_branch_name:
+            if current_branch != target_branch_name:
                 try:
-                    # Check if ASB branch already exists
+                    # Check if target branch already exists
                     existing_branch = None
                     for branch in repo.heads:
-                        if branch.name == asb_branch_name:
+                        if branch.name == target_branch_name:
                             existing_branch = branch
                             break
                     
                     if existing_branch:
                         # Branch exists, just checkout (no reset)
-                        repo.git.checkout(asb_branch_name)
+                        repo.git.checkout(target_branch_name)
+                        used_existing_branch = True
                     else:
-                        # Create new ASB branch based on the onto ref
+                        # Create new branch based on the onto ref
                         try:
-                            repo.git.checkout('-b', asb_branch_name, onto)
+                            repo.git.checkout('-b', target_branch_name, onto)
                         except git.exc.GitCommandError as e:
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create ASB branch {asb_branch_name} from {onto}: {str(e)}")
+                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create branch {target_branch_name} from {onto}: {str(e)}")
                             
                 except git.exc.GitCommandError as e:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout/create ASB branch {asb_branch_name}: {str(e)}")
+                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout/create branch {target_branch_name}: {str(e)}")
         else:
             # Original logic - use mapping.revision
             try:
@@ -250,10 +255,10 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPic
                 return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick succeeded but LFS cleanup failed: {lfs_msg}")
 
         # Prepare push command for later execution
-        if onto and security_patch_level:
-            # For ASB branches, push the current branch (don't specify target)
-            asb_branch_name = f"{onto}-ASB-{security_patch_level}"
-            push_cmd = f"git push {mapping.remote} {asb_branch_name}"
+        if onto and (security_patch_level or branch_name):
+            # For ASB/custom branches, push the current branch
+            target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
+            push_cmd = f"git push {mapping.remote} {target_branch_name}"
         else:
             # Original logic for regular branches
             target_branch = mapping.revision
@@ -267,7 +272,8 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPic
             "cherry-pick completed successfully",
             needs_push=True,
             push_command=push_cmd,
-            had_lfs=had_lfs
+            had_lfs=had_lfs,
+            used_existing_branch=used_existing_branch
         )
 
     except Exception as e:
@@ -275,13 +281,14 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool) -> CherryPic
 
 
 class BulletinCherryPicker:
-    def __init__(self, bulletin_date: str, android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None):
-        self.bulletin_date = bulletin_date
+    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None):
+        self.bulletin_dates = bulletin_dates
         self.android_version = android_version
         self.dry_run = dry_run
         self.max_workers = max_workers
         self.push_only = push_only
         self.onto = onto
+        self.branch_name = branch_name
         self.top = get_android_top()
 
     def run_repo_command(self, command: str) -> bool:
@@ -316,7 +323,8 @@ class BulletinCherryPicker:
                     project_mapping=mapping,
                     patch_info=patch,
                     onto=self.onto,
-                    security_patch_level=security_patch_level
+                    security_patch_level=security_patch_level,
+                    branch_name=self.branch_name
                 )
                 tasks.append(task)
 
@@ -462,14 +470,17 @@ class BulletinCherryPicker:
             table.add_column("Project", style="cyan", no_wrap=True)
             table.add_column("Patch", style="yellow", no_wrap=True)
             table.add_column("Message", style="green")
+            table.add_column("Branch", style="magenta", no_wrap=True)
             table.add_column("", width=2)  # Status column for emoji
 
             for result in successful_picks:
                 emoji = "✅" if result.needs_push else "⏭️"  # Skip emoji for already applied patches
+                branch_status = "existing" if result.used_existing_branch else "new"
                 table.add_row(
                     truncate_project_name(result.project_path),
                     result.patch_ref[:12],  # Show first 12 chars of commit hash
                     result.message,
+                    branch_status,
                     emoji
                 )
 
@@ -498,19 +509,36 @@ class BulletinCherryPicker:
     def run(self):
         """Main execution flow."""
         try:
-            # Fetch bulletin patches
-            console.print(f"[cyan]Fetching security bulletin for {self.bulletin_date}...[/cyan]")
-            bulletin_data = get_bulletin_patches(self.bulletin_date)
+            # Fetch bulletin patches from multiple dates
+            all_bulletin_data = []
+            all_patches = []
+            
+            for bulletin_date in self.bulletin_dates:
+                console.print(f"[cyan]Fetching security bulletin for {bulletin_date}...[/cyan]")
+                bulletin_data = get_bulletin_patches(bulletin_date)
+                all_bulletin_data.extend(bulletin_data)
+                
+                # Filter patches for Android version
+                console.print(f"[cyan]Filtering patches for Android {self.android_version} from {bulletin_date}...[/cyan]")
+                patches = filter_patches_by_android_version(bulletin_data, self.android_version)
+                all_patches.extend(patches)
+                
+                if patches:
+                    console.print(f"[green]Found {len(patches)} patches for Android {self.android_version} in {bulletin_date}[/green]")
+                else:
+                    console.print(f"[yellow]No patches found for Android {self.android_version} in {bulletin_date}[/yellow]")
 
-            # Filter patches for Android version
-            console.print(f"[cyan]Filtering patches for Android {self.android_version}...[/cyan]")
-            patches = filter_patches_by_android_version(bulletin_data, self.android_version)
-
-            if not patches:
-                console.print(f"[yellow]No patches found for Android {self.android_version} in bulletin {self.bulletin_date}[/yellow]")
+            if not all_patches:
+                console.print(f"[yellow]No patches found for Android {self.android_version} in any of the specified bulletins[/yellow]")
                 return 0
+                
+            console.print(f"[green]Total patches found: {len(all_patches)} across {len(self.bulletin_dates)} bulletins[/green]")
+            
+            # Use the combined data for processing
+            bulletin_data = all_bulletin_data
+            patches = all_patches
 
-            console.print(f"[green]Found {len(patches)} patches for Android {self.android_version}[/green]")
+            console.print(f"[green]Processing {len(patches)} patches for Android {self.android_version}[/green]")
 
         except Exception as e:
             console.print(f"[red]Failed to fetch bulletin data: {e}[/red]")
@@ -593,20 +621,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s 2025-09-01 15          # Cherry-pick patches for Android 15 from 2025-09-01 bulletin
-  %(prog)s 2025-09-01 16 --dry-run  # Show what would be cherry-picked
-  %(prog)s 2025-09-01 15 --push-only  # Only push existing cherry-picks
-  %(prog)s 2025-09-01 15 --onto android-16.0.0_r1  # Create android-16.0.0_r1-ASB-2025-09-01 branches
+  %(prog)s 2025-09-01 --android-version 15          # Cherry-pick patches for Android 15
+  %(prog)s 2025-09-01 --android-version 16 --dry-run  # Show what would be cherry-picked
+  %(prog)s 2025-09-01 --android-version 15 --push-only  # Only push existing cherry-picks
+  %(prog)s 2025-09-01 --android-version 15 --onto android-16.0.0_r1  # Auto-generated ASB branches
+  %(prog)s 2025-07-01 2025-08-01 --android-version 16 --onto android-16.0.0_r1 --branch-name android-16.0.0_r1-ASB_2025-08-01  # Custom branch name
         """
     )
 
     parser.add_argument(
-        "bulletin_date",
-        help="Bulletin date in YYYY-MM-DD format"
+        "bulletin_dates",
+        nargs="+",
+        help="One or more bulletin dates in YYYY-MM-DD format"
     )
 
     parser.add_argument(
-        "android_version",
+        "--android-version",
+        required=True,
         help="Android version (e.g., 15, 16)"
     )
 
@@ -635,16 +666,23 @@ Examples:
         help="Create a new branch '<onto>-ASB-<security_patch_level>' and cherry-pick onto it"
     )
 
+    parser.add_argument(
+        "--branch-name",
+        type=str,
+        help="Custom branch name to use instead of auto-generated ASB branch name"
+    )
+
     args = parser.parse_args()
 
     try:
         picker = BulletinCherryPicker(
-            bulletin_date=args.bulletin_date,
+            bulletin_dates=args.bulletin_dates,
             android_version=args.android_version,
             dry_run=args.dry_run,
             max_workers=args.workers,
             push_only=args.push_only,
-            onto=args.onto
+            onto=args.onto,
+            branch_name=args.branch_name
         )
 
         return picker.run()
