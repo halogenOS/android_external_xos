@@ -164,6 +164,35 @@
           meta.mainProgram = pname;
         };
 
+        # Cherry-pick bulletin script as a Python application
+        cherry-pick-bulletin = python3Packages.buildPythonApplication rec {
+          pname = "cherry-pick-bulletin";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            gitpython
+            lxml
+            rich
+            requests
+            beautifulsoup4
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            mkdir -p $out/${python3Packages.python.sitePackages}
+            cp fetch_bulletin.py $out/${python3Packages.python.sitePackages}/
+            cp cherry_pick_bulletin.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Development shell
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -198,6 +227,7 @@
             echo "  python merge_upstream.py    - Merge upstream changes"
             echo "  python reticulate_splines.py - Reticulate splines (create branches from upstream)"
             echo "  python fetch_bulletin.py    - Fetch Android security bulletins as JSON"
+            echo "  python cherry_pick_bulletin.py - Cherry-pick security patches from bulletins"
             echo ""
             echo "Make sure TOP is set and build/envsetup.sh is sourced"
           '';
@@ -212,6 +242,7 @@
           merge-upstream = merge-upstream;
           reticulate-splines = reticulate-splines;
           fetch-bulletin = fetch-bulletin;
+          cherry-pick-bulletin = cherry-pick-bulletin;
           xos-common = xos-common;
         };
 
@@ -239,6 +270,10 @@
           fetch-bulletin = {
             type = "app";
             program = lib.getExe fetch-bulletin;
+          };
+          cherry-pick-bulletin = {
+            type = "app";
+            program = lib.getExe cherry-pick-bulletin;
           };
         };
 
