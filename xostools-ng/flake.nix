@@ -179,6 +179,7 @@
             rich
             requests
             beautifulsoup4
+            rapidfuzz
             xos-common
           ];
 
@@ -186,6 +187,7 @@
             mkdir -p $out/bin
             mkdir -p $out/${python3Packages.python.sitePackages}
             cp fetch_bulletin.py $out/${python3Packages.python.sitePackages}/
+            cp git_lock.py $out/${python3Packages.python.sitePackages}/
             cp cherry_pick_bulletin.py $out/bin/${pname}
             chmod +x $out/bin/${pname}
           '';
@@ -208,6 +210,7 @@
             pygithub
             requests
             beautifulsoup4
+            rapidfuzz
             black
             flake8
             mypy

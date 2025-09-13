@@ -12,6 +12,11 @@ from dataclasses import dataclass
 import git
 from github import Github, GithubException
 from rich.console import Console
+import fcntl
+import time
+import re
+from rapidfuzz import fuzz
+from datetime import datetime, timedelta
 
 @dataclass
 class GitRemote:
@@ -543,6 +548,15 @@ def safe_add_or_update_remote(repo: git.Repo, remote_name: str, url: str) -> git
     else:
         return repo.create_remote(remote_name, url)
 
+def get_aosp_remote_url(aosp_project_name: str) -> str:
+    """Get the AOSP remote URL for a given project name."""
+    return f"https://android.googlesource.com/{aosp_project_name}"
+
+def ensure_aosp_remote(repo: git.Repo, aosp_project_name: str) -> git.Remote:
+    """Ensure AOSP remote exists in repository and return it."""
+    aosp_url = get_aosp_remote_url(aosp_project_name)
+    return safe_add_or_update_remote(repo, 'aosp', aosp_url)
+
 def generate_manifest(top: Path, dry_run: bool = False) -> Path:
     """Generate temporary manifest file."""
     manifest_path = top / "full-manifest.xml"
@@ -743,3 +757,286 @@ def filter_patches_by_android_version(bulletin_data: List[Dict], android_version
                 filtered_patches.append(patch)
 
     return filtered_patches
+
+
+def find_similar_commit_by_message(repo: git.Repo, target_commit_ref: str, similarity_threshold: float = 0.9) -> Optional[str]:
+    """
+    Find commits with similar messages using fuzzy matching and date-based optimization.
+
+    Args:
+        repo: Git repository object
+        target_commit_ref: Reference to the target commit we're looking for
+        similarity_threshold: Minimum similarity ratio (0.0-1.0) to consider a match
+
+    Returns:
+        Commit hash of similar commit if found, None otherwise
+    """
+    try:
+        # Get the target commit object and its full message
+        target_commit = repo.commit(target_commit_ref)
+        target_message = target_commit.message.strip()
+        target_date = target_commit.committed_datetime
+
+        # Optimize search by limiting to commits from target date onwards
+        # Search from 1 second before target date to avoid time precision issues
+        search_since = target_date - timedelta(seconds=1)
+
+        # Get commit log with date filtering (no --until means search until now)
+        log_args = [
+            '--oneline',
+            '--since', search_since.strftime('%Y-%m-%d %H:%M:%S'),
+            '--format=%H %s'  # Hash and subject line
+        ]
+
+        commit_lines = repo.git.log(*log_args).strip()
+        if not commit_lines:
+            return None
+
+        # Parse commits and check similarity
+        for line in commit_lines.split('\n'):
+            if not line.strip():
+                continue
+
+            parts = line.split(' ', 1)
+            if len(parts) < 2:
+                continue
+
+            commit_hash = parts[0]
+            commit_subject = parts[1]
+
+            # Skip if it's the same commit
+            if commit_hash.startswith(target_commit_ref[:7]):
+                continue
+
+            # Get full commit message for comparison
+            try:
+                candidate_commit = repo.commit(commit_hash)
+                candidate_message = candidate_commit.message.strip()
+
+                # Use rapidfuzz for fuzzy matching
+                similarity = fuzz.ratio(target_message, candidate_message) / 100.0
+
+                if similarity >= similarity_threshold:
+                    return commit_hash
+
+            except Exception:
+                # Skip commits we can't access
+                continue
+
+        return None
+
+    except Exception:
+        return None
+
+
+def is_project_tracked_in_xos(project_path: str) -> bool:
+    """
+    Check if a project path is tracked in XOS.xml snippet.
+
+    Args:
+        project_path: The path attribute of the project to check
+
+    Returns:
+        True if project is tracked in XOS.xml, False otherwise
+    """
+    try:
+        top = get_android_top()
+        xos_snippet_path = top / "manifest/snippets/XOS.xml"
+
+        if not xos_snippet_path.exists():
+            return False
+
+        tree = ET.parse(xos_snippet_path)
+        root = tree.getroot()
+
+        # Check for project with matching path
+        for project in root.findall('project'):
+            if project.get('path') == project_path:
+                return True
+
+        # Also check remove.xml for remove-project with matching path
+        remove_xml_path = top / "manifest/snippets/remove.xml"
+        if remove_xml_path.exists():
+            remove_tree = ET.parse(remove_xml_path)
+            remove_root = remove_tree.getroot()
+            for remove_project in remove_root.findall('remove-project'):
+                if remove_project.get('path') == project_path:
+                    return True
+
+        return False
+
+    except Exception:
+        return False
+
+
+def find_project_in_default_manifest(project_path: str) -> Optional[ET.Element]:
+    """
+    Find a project element in the default manifest by path.
+
+    Args:
+        project_path: The path attribute of the project to find
+
+    Returns:
+        Project element if found, None otherwise
+    """
+    try:
+        top = get_android_top()
+        default_manifest_path = top / "manifest/default.xml"
+
+        if not default_manifest_path.exists():
+            console.print(f"[red]Default manifest not found at {default_manifest_path}[/red]")
+            return None
+
+        tree = ET.parse(default_manifest_path)
+        root = tree.getroot()
+
+        # Find project with matching path
+        for project in root.findall('project'):
+            if project.get('path') == project_path:
+                return project
+
+        return None
+
+    except Exception as e:
+        console.print(f"[red]Error parsing default manifest: {e}[/red]")
+        return None
+
+
+def track_project_in_xos(project_path: str, dry_run: bool = False) -> bool:
+    """
+    Track a project by adding it as a remove-project in remove.xml.
+    Projects are added to the "Replaced by tracked repository" section in alphabetical order.
+
+    Args:
+        project_path: The path of the project to track
+        dry_run: If True, only print what would be done
+
+    Returns:
+        True if successful, False otherwise
+    """
+    if is_project_tracked_in_xos(project_path):
+        return True  # Already tracked
+
+    # Find the project in default manifest
+    project_element = find_project_in_default_manifest(project_path)
+    if project_element is None:
+        console.print(f"[red]Project {project_path} not found in default manifest[/red]")
+        return False
+
+    try:
+        top = get_android_top()
+        remove_xml_path = top / "manifest/snippets/remove.xml"
+
+        if dry_run:
+            console.print(f"[blue][DRY RUN] Would track {project_path} in remove.xml[/blue]")
+            return True
+
+        console.print(f"[cyan]Tracking {project_path} in XOS manifests...[/cyan]")
+
+        if not remove_xml_path.exists():
+            console.print(f"[red]remove.xml not found at {remove_xml_path}[/red]")
+            return False
+
+        # Parse the XML with comments preserved using a different approach
+        tree = ET.parse(remove_xml_path)
+        root = tree.getroot()
+
+        # Create new remove-project element with same attributes as original
+        new_element = ET.Element('remove-project')
+        for attr_name, attr_value in project_element.attrib.items():
+            new_element.set(attr_name, attr_value)
+
+        # Find correct insertion position in alphabetical order
+        insert_index = len(root)  # Default to end
+        for i, child in enumerate(root):
+            if hasattr(child, 'tag') and child.tag == 'remove-project':
+                existing_path = child.get('path', '')
+                if project_path < existing_path:
+                    insert_index = i
+                    break
+
+        # Insert the element at the correct position
+        root.insert(insert_index, new_element)
+
+        # Write back with proper formatting
+        # First, let's read the original to preserve structure
+        with open(remove_xml_path, 'r', encoding='utf-8') as f:
+            original_lines = f.readlines()
+
+        # Find the insertion point in the original file
+        insert_line_idx = len(original_lines) - 1  # Before </manifest>
+
+        # Build the new element string with proper formatting
+        attrs = []
+        for attr_name, attr_value in project_element.attrib.items():
+            attrs.append(f'{attr_name}="{attr_value}"')
+        new_line = f'  <remove-project {" ".join(attrs)} />\n'
+
+        # Find where to insert by comparing paths
+        for i, line in enumerate(original_lines):
+            stripped = line.strip()
+            if stripped.startswith('<remove-project '):
+                path_match = re.search(r'path="([^"]*)"', stripped)
+                if path_match:
+                    existing_path = path_match.group(1)
+                    if project_path < existing_path:
+                        insert_line_idx = i
+                        break
+
+        # Insert the new line
+        original_lines.insert(insert_line_idx, new_line)
+
+        # Write back the file
+        with open(remove_xml_path, 'w', encoding='utf-8') as f:
+            f.writelines(original_lines)
+
+        # Also add to XOS.xml
+        xos_xml_path = top / "manifest/snippets/XOS.xml"
+        if xos_xml_path.exists():
+            # Convert path to repository name following XOS pattern: external/rust/crabbyavif -> android_external_rust_crabbyavif
+            repo_name = f"android_{project_path.replace('/', '_')}"
+
+            # Read XOS.xml to find insertion point
+            with open(xos_xml_path, 'r', encoding='utf-8') as f:
+                xos_lines = f.readlines()
+
+            # Build the new project line
+            xos_new_line = f'  <project path="{project_path}" name="{repo_name}" remote="XOS" merge-aosp="true" />\n'
+
+            # Find correct alphabetical position among existing projects
+            xos_insert_idx = len(xos_lines) - 1  # Before </manifest>
+            for i, line in enumerate(xos_lines):
+                stripped = line.strip()
+                if stripped.startswith('<project '):
+                    path_match = re.search(r'path="([^"]*)"', stripped)
+                    if path_match:
+                        existing_path = path_match.group(1)
+                        if project_path < existing_path:
+                            xos_insert_idx = i
+                            break
+
+            # Insert the new project line
+            xos_lines.insert(xos_insert_idx, xos_new_line)
+
+            # Write back XOS.xml
+            with open(xos_xml_path, 'w', encoding='utf-8') as f:
+                f.writelines(xos_lines)
+
+        # Commit the changes
+        try:
+            manifest_repo = git.Repo(top / "manifest")
+            files_to_add = ['snippets/remove.xml']
+            if xos_xml_path.exists():
+                files_to_add.append('snippets/XOS.xml')
+            manifest_repo.index.add(files_to_add)
+            manifest_repo.index.commit(f"Track {project_path}")
+            console.print(f"[green]✓[/green] Tracked {project_path} in manifest files and committed change")
+            return True
+
+        except Exception as e:
+            console.print(f"[yellow]Warning: Added {project_path} to manifest files but failed to commit: {e}[/yellow]")
+            return True  # Still successful, just no commit
+
+    except Exception as e:
+        console.print(f"[red]Failed to track {project_path}: {e}[/red]")
+        return False
