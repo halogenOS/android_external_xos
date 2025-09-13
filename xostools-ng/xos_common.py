@@ -775,7 +775,7 @@ def find_similar_commit_by_message(repo: git.Repo, target_commit_ref: str, simil
         # Get the target commit object and its full message
         target_commit = repo.commit(target_commit_ref)
         target_message = target_commit.message.strip()
-        target_date = target_commit.committed_datetime
+        target_date = target_commit.authored_datetime
 
         # Optimize search by limiting to commits from target date onwards
         # Search from 1 second before target date to avoid time precision issues

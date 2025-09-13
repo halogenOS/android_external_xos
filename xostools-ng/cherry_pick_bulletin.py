@@ -214,6 +214,25 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
         with GitRepoLock(project_path):
             repo = git.Repo(project_path)
 
+            # Check if there's already a merge conflict in progress
+            if repo.git.status('--porcelain').strip():
+                try:
+                    # Check if we're in the middle of a merge/cherry-pick
+                    merge_head_path = project_path / ".git" / "MERGE_HEAD"
+                    cherry_pick_head_path = project_path / ".git" / "CHERRY_PICK_HEAD"
+
+                    if merge_head_path.exists() or cherry_pick_head_path.exists():
+                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "repository has unresolved merge conflict - resolve or abort first")
+
+                    # Check for unstaged changes that could interfere
+                    status_output = repo.git.status('--porcelain')
+                    if any(line.startswith(('UU', 'AA', 'DD')) for line in status_output.split('\n')):
+                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "repository has unresolved merge conflicts")
+
+                except Exception:
+                    # If we can't check status, assume there might be conflicts
+                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "unable to check repository status for conflicts")
+
             if dry_run:
                 # Check current branch and status for better dry-run info
                 try:
@@ -283,7 +302,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                             return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"remote '{onto_remote}' not found for onto parameter")
 
                     # Fetch the specific ref from the remote to ensure we have it
-                    remote_obj.fetch(refspec=f"{onto_ref}:{onto_ref}")
+                    remote_obj.fetch(refspec=onto_ref)
                 except Exception as e:
                     return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to fetch from remote '{onto_remote}': {str(e)}")
 
@@ -310,12 +329,28 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                             repo.git.checkout(target_branch_name)
                             used_existing_branch = True
                         else:
-                            # Create new branch based on the onto ref (with remote if specified)
+                            # Create new branch based on the onto ref
                             try:
-                                full_onto_ref = f"{onto_remote}/{onto_ref}" if onto_remote else onto
-                                repo.git.checkout('-b', target_branch_name, full_onto_ref)
+                                # Check if the ref is a tag (tags don't use remote prefix)
+                                is_tag = False
+                                try:
+                                    # Try to show the tag - if it exists, it's a tag
+                                    repo.git.show_ref('--tags', f'refs/tags/{onto_ref}')
+                                    is_tag = True
+                                except git.exc.GitCommandError:
+                                    # Not a tag, might be a branch
+                                    pass
+
+                                if is_tag:
+                                    # For tags, use the tag name directly
+                                    checkout_ref = onto_ref
+                                else:
+                                    # For branches, use remote prefix if specified
+                                    checkout_ref = f"{onto_remote}/{onto_ref}" if onto_remote else onto
+
+                                repo.git.checkout('-b', target_branch_name, checkout_ref)
                             except git.exc.GitCommandError as e:
-                                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create branch {target_branch_name} from {full_onto_ref}: {str(e)}")
+                                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create branch {target_branch_name} from {checkout_ref}: {str(e)}")
 
                     except git.exc.GitCommandError as e:
                         return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout/create branch {target_branch_name}: {str(e)}")
@@ -370,6 +405,15 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
                 # Use fuzzy matching to find similar commits (>90% similarity)
                 existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9)
+                if existing_commit:
+                    console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit: {existing_commit[:8]} for {patch_ref[:8]}")
+                else:
+                    console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
+
+                    # Try with lower threshold for debugging
+                    debug_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.8)
+                    if debug_commit:
+                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Would match with 80% threshold: {debug_commit[:8]}")
 
                 # Try cherry-pick
                 try:
@@ -377,8 +421,28 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 except git.exc.GitCommandError as cherry_pick_error:
                     error_msg = str(cherry_pick_error)
 
-                    # Check if it's just empty changes and we have existing commit
-                    if existing_commit and ("nothing to commit" in error_msg.lower() or "no changes added to commit" in error_msg.lower() or "would result in an empty commit" in error_msg.lower()):
+                    # Check if it's just empty changes
+                    is_empty_cherrypick = ("nothing to commit" in error_msg.lower() or "no changes added to commit" in error_msg.lower() or "would result in an empty commit" in error_msg.lower() or "the previous cherry-pick is now empty" in error_msg.lower())
+
+                    if is_empty_cherrypick:
+                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
+                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
+
+                        # If we found a similar commit via fuzzy matching, use it
+                        if existing_commit:
+                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
+                            reference_commit = existing_commit
+                        else:
+                            # Try to find ANY commit that might be related by searching for similar changes
+                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Searching for any similar commit with lower threshold...")
+                            reference_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.7)
+                            if reference_commit:
+                                console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Found with 70% threshold: {reference_commit[:8]}")
+                            else:
+                                console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found even with 70% threshold")
+                                # Use a generic reference for the empty case
+                                reference_commit = "unknown"
+
                         # Abort the cherry-pick and clean up
                         try:
                             repo.git.cherry_pick('--abort')
@@ -391,8 +455,12 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                             # Get the original commit message for the [ALREADY APPLIED] commit
                             original_commit = repo.commit(patch_ref)
                             patch_title = original_commit.message.split('\n')[0].strip()
-                            already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
+                            if reference_commit != "unknown":
+                                already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit was already applied in {reference_commit}\nCherry-picked from: {patch_ref}"
+                            else:
+                                already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit changes appear to already be present\nCherry-picked from: {patch_ref}"
                             repo.git.commit('--allow-empty', '-m', already_applied_msg)
+                            console.print(f"  [green]→[/green] {mapping.local_path}: Created [ALREADY APPLIED] commit for {patch_ref[:8]}")
                         except git.exc.GitCommandError as commit_error:
                             return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create [ALREADY APPLIED] commit: {str(commit_error)}")
                     else:
