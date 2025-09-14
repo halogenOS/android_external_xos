@@ -28,6 +28,10 @@
             lxml
             pygithub
             python-gitlab
+            rich
+            rapidfuzz
+            tqdm
+            packaging
           ];
 
           installPhase = ''
@@ -45,12 +49,7 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            gitpython
-            tqdm
-            lxml
-            rich
-            pygithub
+          propagatedBuildInputs = [
             xos-common
           ];
 
@@ -72,10 +71,7 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            gitpython
-            lxml
-            rich
+          propagatedBuildInputs = [
             xos-common
           ];
 
@@ -97,10 +93,7 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            gitpython
-            lxml
-            rich
+          propagatedBuildInputs = [
             xos-common
           ];
 
@@ -122,10 +115,7 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            gitpython
-            lxml
-            rich
+          propagatedBuildInputs = [
             xos-common
           ];
 
@@ -150,9 +140,6 @@
           propagatedBuildInputs = with python3Packages; [
             requests
             beautifulsoup4
-            lxml
-            gitpython
-            rich
             xos-common
           ];
 
@@ -175,13 +162,8 @@
           format = "other";
 
           propagatedBuildInputs = with python3Packages; [
-            gitpython
-            lxml
-            rich
             requests
             beautifulsoup4
-            rapidfuzz
-            python-gitlab
             xos-common
           ];
 
@@ -206,10 +188,8 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            packaging
-            tqdm
-            python-gitlab
+          propagatedBuildInputs = [
+            xos-common
           ];
 
           installPhase = ''
@@ -230,10 +210,8 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            packaging
-            tqdm
-            pygithub
+          propagatedBuildInputs = [
+            xos-common
           ];
 
           installPhase = ''
@@ -255,14 +233,62 @@
 
           format = "other";
 
-          propagatedBuildInputs = with python3Packages; [
-            python-gitlab
-            tqdm
+          propagatedBuildInputs = [
+            xos-common
           ];
 
           installPhase = ''
             mkdir -p $out/bin
             cp manage_webhooks.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
+        # Branch merger script as a Python application
+        merge-branches = python3Packages.buildPythonApplication rec {
+          pname = "merge-branches";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = [
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp merge_branches.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
+        # Verify bulletin script as a Python application
+        verify-bulletin = python3Packages.buildPythonApplication rec {
+          pname = "verify-bulletin";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            requests
+            beautifulsoup4
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            mkdir -p $out/${python3Packages.python.sitePackages}
+            cp fetch_bulletin.py $out/${python3Packages.python.sitePackages}/
+            cp git_lock.py $out/${python3Packages.python.sitePackages}/
+            cp verify_bulletin.py $out/bin/${pname}
             chmod +x $out/bin/${pname}
           '';
 
@@ -309,6 +335,8 @@
             echo "  python set_default_branches.py - Set default branches for GitLab repositories"
             echo "  python set_default_branches_github.py - Set default branches for GitHub repositories"
             echo "  python manage_webhooks.py   - Manage GitLab webhooks for repositories"
+            echo "  python merge_branches.py    - Merge branches across all repositories"
+            echo "  python verify_bulletin.py   - Verify security patches from bulletins"
             echo ""
             echo "Make sure TOP is set and build/envsetup.sh is sourced"
           '';
@@ -328,6 +356,8 @@
           gitlab-branch-setter = gitlab-branch-setter;
           github-branch-setter = github-branch-setter;
           gitlab-webhook-manager = gitlab-webhook-manager;
+          merge-branches = merge-branches;
+          verify-bulletin = verify-bulletin;
         };
 
         apps = {
@@ -370,6 +400,14 @@
           gitlab-webhook-manager = {
             type = "app";
             program = lib.getExe gitlab-webhook-manager;
+          };
+          merge-branches = {
+            type = "app";
+            program = lib.getExe merge-branches;
+          };
+          verify-bulletin = {
+            type = "app";
+            program = lib.getExe verify-bulletin;
           };
         };
 

@@ -961,6 +961,280 @@ def find_project_in_default_manifest(project_path: str) -> Optional[ET.Element]:
         return None
 
 
+def create_branch_from_upstream(repo_path: Path, upstream_remote: str, upstream_branch: str,
+                               target_branch: str, dry_run: bool = False) -> Tuple[bool, str]:
+    """
+    Create a new branch from an upstream branch.
+
+    Args:
+        repo_path: Path to the repository
+        upstream_remote: Name of the upstream remote
+        upstream_branch: Branch name on the upstream remote
+        target_branch: Name of the branch to create
+        dry_run: If True, only check what would be done
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        repo = git.Repo(repo_path)
+
+        if dry_run:
+            # Check if target branch already exists locally
+            if target_branch in [head.name for head in repo.heads]:
+                return True, f"would checkout existing branch {target_branch}"
+
+            # Check if upstream branch exists
+            try:
+                upstream_ref = f"{upstream_remote}/{upstream_branch}"
+                repo.commit(upstream_ref)
+                return True, f"would create {target_branch} from {upstream_ref}"
+            except (git.exc.BadName, git.exc.GitCommandError):
+                return False, f"upstream branch {upstream_ref} not found"
+
+        # Check if target branch already exists locally
+        if target_branch in [head.name for head in repo.heads]:
+            console.print(f"[yellow]Branch {target_branch} already exists, checking it out[/yellow]")
+            repo.heads[target_branch].checkout()
+            return True, f"checked out existing branch {target_branch}"
+
+        # Create new branch from upstream
+        upstream_ref = f"{upstream_remote}/{upstream_branch}"
+        try:
+            # Verify upstream reference exists
+            upstream_commit = repo.commit(upstream_ref)
+            # Create and checkout new branch
+            new_branch = repo.create_head(target_branch, upstream_commit)
+            new_branch.checkout()
+            return True, f"created branch {target_branch} from {upstream_ref}"
+        except (git.exc.BadName, git.exc.GitCommandError) as e:
+            return False, f"failed to create branch from {upstream_ref}: {str(e)}"
+
+    except Exception as e:
+        return False, f"repository error: {str(e)}"
+
+
+def merge_branch_into_current(repo_path: Path, source_branch: str, dry_run: bool = False) -> Tuple[bool, str]:
+    """
+    Merge a source branch into the currently checked out branch.
+
+    Args:
+        repo_path: Path to the repository
+        source_branch: Name of the branch to merge from
+        dry_run: If True, only check what would be done
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        repo = git.Repo(repo_path)
+        current_branch = repo.active_branch.name
+
+        if dry_run:
+            # Check if source branch exists
+            if source_branch in [head.name for head in repo.heads]:
+                return True, f"would merge {source_branch} into {current_branch}"
+            else:
+                return False, f"source branch {source_branch} not found"
+
+        # Check if source branch exists
+        if source_branch not in [head.name for head in repo.heads]:
+            return False, f"source branch {source_branch} not found"
+
+        # Check for dirty working tree
+        if repo.is_dirty(untracked_files=True):
+            return False, "repository has unstaged changes or untracked files"
+
+        # Perform the merge
+        try:
+            # Get current HEAD before merge
+            pre_merge_commit = repo.head.commit.hexsha
+
+            # Perform merge
+            repo.git.merge(source_branch)
+
+            # Check if anything was actually merged
+            post_merge_commit = repo.head.commit.hexsha
+
+            if pre_merge_commit == post_merge_commit:
+                return True, f"merge of {source_branch} resulted in no changes (already up-to-date)"
+            else:
+                return True, f"successfully merged {source_branch} into {current_branch}"
+
+        except git.exc.GitCommandError as e:
+            # Check if it's a merge conflict
+            if "CONFLICT" in str(e) or "conflict" in str(e).lower():
+                return True, f"merge conflicts detected when merging {source_branch} - please resolve manually"
+            else:
+                return False, f"merge failed: {str(e)}"
+
+    except Exception as e:
+        return False, f"repository error: {str(e)}"
+
+
+def branch_exists_locally(repo_path: Path, branch_name: str) -> bool:
+    """
+    Check if a branch exists locally in the repository.
+
+    Args:
+        repo_path: Path to the repository
+        branch_name: Name of the branch to check
+
+    Returns:
+        True if branch exists locally, False otherwise
+    """
+    try:
+        repo = git.Repo(repo_path)
+        return branch_name in [head.name for head in repo.heads]
+    except git.exc.InvalidGitRepositoryError:
+        return False
+
+
+def get_xos_target_branch_for_tracked_project(project_path: str) -> Optional[str]:
+    """
+    Get the XOS target branch name for a tracked project by looking at XOS remote revision.
+
+    Args:
+        project_path: Project path in manifest
+
+    Returns:
+        XOS branch name or None if not found
+    """
+    try:
+        top = get_android_top()
+
+        # Check XOS.xml snippet
+        xos_snippet_path = top / ".repo/manifests/snippets/XOS.xml"
+        if xos_snippet_path.exists():
+            xos_tree = ET.parse(xos_snippet_path)
+            xos_root = xos_tree.getroot()
+
+            # Look for project in XOS snippet
+            project_elem = xos_root.find(f"project[@path='{project_path}']")
+            if project_elem is not None:
+                revision = project_elem.get('revision')
+                if revision:
+                    return revision.replace('refs/heads/', '')
+                else:
+                    # Get revision from XOS remote specification
+                    remote_name = project_elem.get('remote', 'XOS')
+                    xos_remote = xos_root.find(f"remote[@name='{remote_name}']")
+                    if xos_remote is not None:
+                        revision = xos_remote.get('revision')
+                        if revision:
+                            return revision.replace('refs/heads/', '')
+
+        return None
+
+    except Exception:
+        return None
+
+
+def setup_tracked_project_branch(repo_path: Path, project_path: str, target_branch: str, dry_run: bool = False) -> Tuple[bool, str]:
+    """
+    Set up a branch for a newly tracked project by determining upstream info from default.xml
+    and creating the branch from upstream, just like reticulate_splines does.
+
+    Args:
+        repo_path: Path to the repository
+        project_path: Project path in manifest
+        target_branch: Target branch name
+        dry_run: If True, only check what would be done
+
+    Returns:
+        Tuple of (success, message)
+    """
+    try:
+        top = get_android_top()
+        aosp_snippet_path = top / ".repo/manifests/default.xml"
+
+        if not aosp_snippet_path.exists():
+            return False, f"default manifest not found at {aosp_snippet_path}"
+
+        aosp_tree = ET.parse(aosp_snippet_path)
+        aosp_root = aosp_tree.getroot()
+
+        # Find project in default manifest
+        project_element = aosp_root.find(f"project[@path='{project_path}']")
+        if project_element is None:
+            return False, f"project {project_path} not found in default manifest"
+
+        aosp_name = project_element.get('name')
+        if not aosp_name:
+            return False, f"project {project_path} has no name in default manifest"
+
+        # Get AOSP remote URL from default.xml
+        aosp_remote = aosp_root.find("remote[@name='aosp']")
+        if aosp_remote is None:
+            return False, "AOSP remote not found in default manifest"
+
+        aosp_fetch_url = aosp_remote.get('fetch')
+        if not aosp_fetch_url:
+            return False, "AOSP remote has no fetch URL"
+
+        upstream_url = f"{aosp_fetch_url.rstrip('/')}/{aosp_name}"
+
+        # Get upstream revision - first try project-specific, then remote, then default
+        upstream_rev = project_element.get('revision')
+
+        if not upstream_rev:
+            upstream_rev = aosp_remote.get('revision')
+
+        if not upstream_rev:
+            default_aosp = aosp_root.find("default[@remote='aosp']")
+            if default_aosp is not None:
+                upstream_rev = default_aosp.get('revision')
+
+        if not upstream_rev:
+            return False, f"unable to determine AOSP upstream revision for {project_path}"
+
+        # Don't clean up revision here - we need to handle refs/tags/ vs refs/heads/ later
+
+        if dry_run:
+            return True, f"would create {target_branch} from {upstream_url}@{upstream_rev}"
+
+        # Now actually set up the branch like reticulate_splines does
+        repo = git.Repo(repo_path)
+
+        # Set up upstream remote
+        upstream_remote = safe_add_or_update_remote(repo, 'upstream', upstream_url)
+
+        # Fetch from upstream
+        console.print(f"[cyan]{project_path}:[/cyan] Fetching upstream")
+        upstream_remote.fetch()
+
+        # Check if it's a tag or branch and extract the reference name
+        if upstream_rev.startswith('refs/tags/'):
+            # It's a tag - extract tag name
+            ref_name = upstream_rev.replace('refs/tags/', '')
+            is_tag = True
+        elif upstream_rev.startswith('refs/heads/'):
+            # It's a branch - extract branch name
+            ref_name = upstream_rev.replace('refs/heads/', '')
+            is_tag = False
+        else:
+            # Assume it's a branch name without refs/heads/
+            ref_name = upstream_rev
+            is_tag = False
+
+        # Create target branch from upstream
+        console.print(f"[cyan]{project_path}:[/cyan] Creating {target_branch} from upstream")
+
+        if is_tag:
+            # For tags, fetch the tag first, then checkout using just the tag name
+            repo.git.fetch('upstream', f'refs/tags/{ref_name}:refs/tags/{ref_name}')
+            repo.git.checkout(ref_name, B=target_branch)
+        else:
+            # For branches, checkout from the remote reference
+            upstream_ref = f"upstream/{ref_name}"
+            repo.git.checkout(upstream_ref, B=target_branch)
+
+        return True, f"created {target_branch} from {upstream_url}@{upstream_rev}"
+
+    except Exception as e:
+        return False, f"error setting up tracked project: {str(e)}"
+
+
 def track_project_in_xos(project_path: str, dry_run: bool = False) -> bool:
     """
     Track a project by adding it as a remove-project in remove.xml.
