@@ -84,11 +84,11 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
         if dry_run:
             # In dry-run mode, analyze what would be done without making changes
             notes = []
-            
+
             # Check if directory exists
             if not project_path.exists():
                 notes.append("would create directory")
-            
+
             # Check if git repo exists
             if not (project_path / ".git").exists():
                 notes.append("would initialize git repo")
@@ -96,7 +96,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
                 # Try to analyze existing repo
                 try:
                     repo = git.Repo(project_path)
-                    
+
                     # Check if XOS remote exists
                     if 'XOS' in [remote.name for remote in repo.remotes]:
                         xos_remote = repo.remote('XOS')
@@ -113,15 +113,15 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
                             pass  # Can't check remote refs in dry-run
                     else:
                         notes.append("would add XOS remote")
-                    
+
                     # Check if upstream remote exists
                     if 'upstream' not in [remote.name for remote in repo.remotes]:
                         notes.append("would add upstream remote")
-                    
+
                     # Check if shallow
                     if GitOperations.is_shallow_repo(project_path):
                         notes.append("would unshallow repo")
-                    
+
                     # Check for LFS
                     lfsconfig_exists = (project_path / ".lfsconfig").exists()
                     gitattributes_has_lfs = False
@@ -129,19 +129,19 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
                     if gitattributes_path.exists():
                         with open(gitattributes_path, 'r') as f:
                             gitattributes_has_lfs = 'merge=lfs' in f.read()
-                    
+
                     if lfsconfig_exists or gitattributes_has_lfs:
                         notes.append("would handle LFS cleanup")
-                        
+
                 except git.exc.InvalidGitRepositoryError:
                     notes.append("would initialize git repo")
-            
+
             notes.append("would fetch upstream")
             notes.append("would checkout branch")
             if has_create_xos:
                 notes.append("would create repo if needed")
             notes.append("would push to XOS")
-            
+
             note_str = f" ({', '.join(notes)})" if notes else ""
             return SplineResult(
                 project_name,
@@ -151,7 +151,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
             )
 
         # ===== ACTUAL EXECUTION MODE =====
-        
+
         # Create directory if it doesn't exist
         project_path.mkdir(parents=True, exist_ok=True)
 
@@ -169,7 +169,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
         # Set up XOS remote
         xos_url = f"https://git.halogenos.org/halogenOS/{task.project.name}"
         xos_push_url = f"git@git.halogenos.org:halogenOS/{task.project.name}"
-        
+
         xos_remote = safe_add_or_update_remote(repo, 'XOS', xos_url)
         # Set push URL using git command directly
         repo.git.remote('set-url', '--push', 'XOS', xos_push_url)
@@ -210,7 +210,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
 
         # Checkout the upstream revision to target branch
         console.print(f"[cyan]{project_name}:[/cyan] Checking out {task.upstream_rev} -> {task.target_branch}")
-        
+
         if task.is_tag:
             # Direct checkout of tag
             repo.git.checkout(task.upstream_rev, B=task.target_branch)
@@ -292,7 +292,7 @@ class SplineReticulator:
         self.force_push = force_push
         self.single_path = single_path
         self.top = get_android_top()
-        
+
         # Check if createXos is available
         self.has_create_xos = True
         try:
@@ -309,7 +309,7 @@ class SplineReticulator:
     def parse_spline_tasks(self, manifest_path: Path) -> List[SplineTask]:
         """Parse projects that need spline reticulation."""
         tasks = []
-        
+
         # Parse snippets and manifests
         snippet_path = self.top / ".repo/manifests/snippets/XOS.xml"
         aosp_snippet_path = self.top / ".repo/manifests/default.xml"
@@ -317,7 +317,7 @@ class SplineReticulator:
         try:
             # Get ROM revision
             rom_revision = os.environ.get('ROM_REVISION') or os.environ.get('ROM_VERSION')
-            
+
             manifest_tree = ET.parse(manifest_path)
             manifest_root = manifest_tree.getroot()
 
@@ -338,14 +338,14 @@ class SplineReticulator:
                 target_paths = [self.single_path]
             else:
                 target_paths = []
-                
+
                 # Add projects with merge-aosp attribute
                 if snippet_path.exists():
                     snippet_tree = ET.parse(snippet_path)
                     snippet_root = snippet_tree.getroot()
                     merge_aosp_paths = [p.get('path') for p in snippet_root.findall('project[@merge-aosp]')]
                     target_paths.extend(merge_aosp_paths)
-                
+
                 # Add projects with upstream attribute
                 upstream_paths = [p.get('path') for p in manifest_root.findall('project[@upstream]')]
                 target_paths.extend(upstream_paths)
@@ -361,10 +361,10 @@ class SplineReticulator:
                 name = project_elem.get('name')
                 remote = project_elem.get('remote', default_remote)
                 revision = project_elem.get('revision')
-                
+
                 if not revision:
                     revision = remotes.get(remote, default_revision)
-                
+
                 short_revision = revision.replace('refs/heads/', '')
 
                 # Check if this is an AOSP merge project
@@ -377,11 +377,11 @@ class SplineReticulator:
 
                 # Initialize is_tag for all projects
                 is_tag = False
-                
+
                 if is_aosp:
                     # Handle AOSP project
                     console.print(f"[blue]Processing AOSP project: {path}[/blue]")
-                    
+
                     # Get AOSP path
                     if aosp_snippet_path.exists():
                         aosp_tree = ET.parse(aosp_snippet_path)
@@ -393,30 +393,30 @@ class SplineReticulator:
                             aosp_name = f"platform/{path}"
                     else:
                         aosp_name = f"platform/{path}"
-                    
+
                     upstream_url = f"https://android.googlesource.com/{aosp_name}"
-                    
+
                     # Get AOSP revision
                     upstream_rev = None
                     if aosp_snippet_path.exists():
                         aosp_tree = ET.parse(aosp_snippet_path)
                         aosp_root = aosp_tree.getroot()
-                        
+
                         # Try to get revision from aosp remote first
                         aosp_remote = aosp_root.find("remote[@name='aosp']")
                         if aosp_remote is not None:
                             upstream_rev = aosp_remote.get('revision')
-                        
+
                         # If not found, try default with remote='aosp'
                         if not upstream_rev:
                             default_aosp = aosp_root.find("default[@remote='aosp']")
                             if default_aosp is not None:
                                 upstream_rev = default_aosp.get('revision')
-                        
+
                         # Clean up revision (only remove refs/heads/ like the original script)
                         if upstream_rev:
                             upstream_rev = upstream_rev.replace('refs/heads/', '')
-                    
+
                     if not upstream_rev:
                         console.print(f"[red]Unable to determine AOSP upstream revision for {path}[/red]")
                         continue
@@ -485,13 +485,13 @@ class SplineReticulator:
         # Display successful reticulations
         if successful_results:
             console.print(f"\n[bold green]Successful spline reticulations ({len(successful_results)}):[/bold green]")
-            
+
             table = Table(show_header=True, header_style="bold blue")
             table.add_column("Project", style="cyan", no_wrap=True)
             table.add_column("Status", style="green")
             table.add_column("Notes", style="dim")
             table.add_column("", width=2)  # Status emoji
-            
+
             for result in successful_results:
                 notes = []
                 if result.was_skipped:
@@ -503,32 +503,32 @@ class SplineReticulator:
                         notes.append("new repo")
                     if result.had_lfs:
                         notes.append("LFS cleanup")
-                
+
                 table.add_row(
                     truncate_project_name(result.project_path),
                     status,
                     ", ".join(notes) if notes else "",
                     "✅" if not result.was_skipped else "⏭️"
                 )
-            
+
             console.print(table)
 
         # Display failed reticulations
         if failed_results:
             console.print(f"\n[bold red]Failed spline reticulations ({len(failed_results)}):[/bold red]")
-            
+
             fail_table = Table(show_header=True, header_style="bold red")
             fail_table.add_column("Project", style="cyan", no_wrap=True)
             fail_table.add_column("Error", style="red")
             fail_table.add_column("", width=2)  # Status emoji
-            
+
             for result in failed_results:
                 fail_table.add_row(
                     truncate_project_name(result.project_path),
                     result.message,
                     "❌"
                 )
-            
+
             console.print(fail_table)
 
     def process_splines(self, tasks: List[SplineTask]) -> Tuple[List[SplineResult], List[SplineResult]]:
@@ -620,7 +620,7 @@ class SplineReticulator:
         console.print("\n" + "=" * 60)
         console.print("[bold]Spline reticulation complete![/bold]")
         console.print(f"[green]Successfully processed:[/green] {len(successful_results)}/{len(tasks)} projects")
-        
+
         skipped_count = len([r for r in successful_results if r.was_skipped])
         if skipped_count > 0:
             console.print(f"[blue]Skipped (already exist):[/blue] {skipped_count} projects")

@@ -581,33 +581,33 @@ class UpstreamMerger:
             console.print(f"[blue]Push-only mode: Assuming all {len(tasks)} projects are already merged[/blue]")
             successful_merges = []
             failed_merges = []
-            
+
             # Create successful merge results for all tasks
             for task in tasks:
                 project_name = task.project.path
                 project_path = task.project_path
                 target_branch = task.short_revision
-                
+
                 if not project_path.exists():
                     continue
-                
+
                 try:
                     repo = git.Repo(project_path)
-                    
+
                     # Check if local HEAD is different from remote HEAD
                     try:
                         local_head = repo.head.commit.hexsha
                         remote_ref = f"{task.repo_remote}/{target_branch}"
                         remote_head = repo.commit(remote_ref).hexsha
-                        
+
                         if local_head == remote_head:
                             # Skip repos that are already up to date
                             continue
-                            
+
                     except git.exc.GitCommandError:
                         # Remote ref doesn't exist, assume we need to push
                         pass
-                    
+
                     push_cmd = f"git push XOS HEAD:{target_branch}"
                     successful_merges.append(MergeResult(
                         project_name,
@@ -616,7 +616,7 @@ class UpstreamMerger:
                         needs_push=True,
                         push_command=push_cmd
                     ))
-                    
+
                 except Exception:
                     # Skip projects that can't be processed
                     continue
