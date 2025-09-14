@@ -128,9 +128,27 @@ def group_tasks_by_repository(tasks):
     return repo_buckets
 
 
+def create_failed_result_from_exception(task, exception):
+    """Create a failed CherryPickResult from an exception."""
+    return CherryPickResult(
+        task.project_mapping.local_path,
+        task.patch_info['ref'],
+        task.patch_info['url'],
+        False,
+        f"exception: {str(exception)}"
+    )
+
+
+def process_single_task_safely(task, dry_run, cherry_picker, progress, bucket_task):
+    """Process a single task with exception handling."""
+    try:
+        return perform_single_cherry_pick(task, dry_run, cherry_picker, progress, bucket_task)
+    except Exception as e:
+        return create_failed_result_from_exception(task, e)
+
+
 def process_repo_bucket(repo_path, repo_tasks, dry_run, cherry_picker, progress, pick_task, stop_event):
     """Process all tasks for a single repository sequentially."""
-    # Create a progress bar for this specific repository bucket
     bucket_task = progress.add_task(
         f"[dim]Starting {repo_path}...",
         total=len(repo_tasks)
@@ -141,26 +159,13 @@ def process_repo_bucket(repo_path, repo_tasks, dry_run, cherry_picker, progress,
         if stop_event.is_set():
             break
 
-        try:
-            result = perform_single_cherry_pick(task, dry_run, cherry_picker, progress, bucket_task)
-            bucket_results.append(result)
-        except Exception as e:
-            failed_result = CherryPickResult(
-                task.project_mapping.local_path,
-                task.patch_info['ref'],
-                task.patch_info['url'],
-                False,
-                f"exception: {str(e)}"
-            )
-            bucket_results.append(failed_result)
+        result = process_single_task_safely(task, dry_run, cherry_picker, progress, bucket_task)
+        bucket_results.append(result)
 
-        # Update both main progress and bucket progress
         progress.update(pick_task, advance=1)
         progress.update(bucket_task, advance=1)
 
-    # Remove the bucket progress bar when done
     progress.remove_task(bucket_task)
-
     return bucket_results
 
 
@@ -195,6 +200,254 @@ def process_completed_bucket_futures(futures, progress, stop_event, successful_p
             console.print(f"[red]Exception processing repository bucket {repo_path}: {str(e)}[/red]")
 
 
+def check_conflict_state(cherry_picker, mapping, patch_ref, patch_url, dry_run):
+    """Check if repository is in conflict state."""
+    if cherry_picker and not dry_run:
+        with cherry_picker.conflict_lock:
+            if mapping.local_path in cherry_picker.conflicted_repos:
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "skipped due to previous conflict in this repository", verbose_only=True)
+    return None
+
+
+def check_merge_conflicts(repo, project_path, mapping, patch_ref, patch_url):
+    """Check for existing merge conflicts in repository."""
+    if repo.git.status('--porcelain').strip():
+        try:
+            merge_head_path = project_path / ".git" / "MERGE_HEAD"
+            cherry_pick_head_path = project_path / ".git" / "CHERRY_PICK_HEAD"
+
+            if merge_head_path.exists() or cherry_pick_head_path.exists():
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "repository has unresolved merge conflict - resolve or abort first")
+
+            status_output = repo.git.status('--porcelain')
+            if any(line.startswith(('UU', 'AA', 'DD')) for line in status_output.split('\n')):
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "repository has unresolved merge conflicts")
+
+        except Exception:
+            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "unable to check repository status for conflicts")
+    return None
+
+
+def create_dry_run_result(mapping, patch_ref, patch_url, project_path, onto, security_patch_level, branch_name):
+    """Create dry-run result with repository information."""
+    try:
+        current_branch = "detached HEAD"
+        try:
+            repo = git.Repo(project_path)
+            current_branch = repo.active_branch.name
+        except TypeError:
+            pass
+
+        is_shallow = GitOperations.is_shallow_repo(project_path)
+        shallow_info = " (shallow repo - would unshallow)" if is_shallow else ""
+
+        lfsconfig_exists = (project_path / ".lfsconfig").exists()
+        gitattributes_has_lfs = False
+        gitattributes_path = project_path / ".gitattributes"
+        if gitattributes_path.exists():
+            with open(gitattributes_path, 'r') as f:
+                gitattributes_has_lfs = 'merge=lfs' in f.read()
+        lfs_info = " (has LFS - would cleanup)" if (lfsconfig_exists or gitattributes_has_lfs) else ""
+
+        branch_info = ""
+        if onto and (security_patch_level or branch_name):
+            target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
+            branch_info = f" onto branch {target_branch_name}"
+
+        return CherryPickResult(
+            mapping.local_path,
+            patch_ref,
+            patch_url,
+            True,
+            f"would cherry-pick {patch_ref[:12]} from {mapping.aosp_name}{branch_info}{shallow_info}{lfs_info}"
+        )
+    except Exception as e:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"dry-run check failed: {str(e)}")
+
+
+def setup_repository(repo, mapping, project_path):
+    """Setup repository by ensuring AOSP remote and unshallowing if needed."""
+    aosp_remote = ensure_aosp_remote(repo, mapping.aosp_name)
+
+    if GitOperations.is_shallow_repo(project_path):
+        try:
+            repo = git.Repo(project_path)
+            repo.git.fetch(mapping.remote, "--unshallow")
+        except Exception as e:
+            raise Exception(f"failed to unshallow repository: {str(e)}")
+
+    return aosp_remote
+
+
+def setup_onto_branch(repo, onto, mapping, patch_ref, patch_url):
+    """Setup branch when using --onto parameter."""
+    if '/' not in onto:
+        return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"--onto parameter must be in format 'remote/ref', got: {onto}")
+
+    parts = onto.split('/', 1)
+    onto_remote = parts[0]
+    onto_ref = parts[1]
+
+    try:
+        if onto_remote == 'aosp':
+            remote_obj = ensure_aosp_remote(repo, mapping.aosp_name)
+        else:
+            remote_obj = safe_get_remote(repo, onto_remote)
+            if not remote_obj:
+                return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"remote '{onto_remote}' not found for onto parameter")
+
+        remote_obj.fetch(refspec=onto_ref)
+        return onto_ref, None
+    except Exception as e:
+        return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to fetch from remote '{onto_remote}': {str(e)}")
+
+
+def setup_default_branch(repo, mapping, patch_ref, patch_url):
+    """Setup default branch checkout."""
+    try:
+        current_branch = repo.active_branch.name
+    except TypeError:
+        current_branch = None
+
+    target_branch = mapping.revision
+
+    if current_branch != target_branch:
+        try:
+            repo.git.checkout(target_branch)
+        except git.exc.GitCommandError:
+            try:
+                remote_ref = f"{mapping.remote}/{target_branch}"
+                repo.git.fetch(mapping.remote)
+                repo.git.checkout('-b', target_branch, remote_ref)
+                branch = repo.heads[target_branch]
+                branch.set_tracking_branch(repo.remotes[mapping.remote].refs[target_branch])
+            except git.exc.GitCommandError as e:
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout branch {target_branch}: {str(e)}")
+    return None
+
+
+def check_existing_commit(repo, patch_ref, mapping, patch_url):
+    """Check if commit already exists in current branch."""
+    try:
+        repo.git.merge_base('--is-ancestor', patch_ref, 'HEAD')
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "patch already applied (skipped)", needs_push=False)
+    except git.exc.GitCommandError:
+        return None
+
+
+def handle_empty_cherry_pick(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url, onto):
+    """Handle empty cherry-pick by creating appropriate commit."""
+    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
+    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
+
+    original_commit = repo.commit(patch_ref)
+    patch_title = original_commit.message.split('\n')[0].strip()
+    already_applied_title = f"{ALREADY_APPLIED_PREFIX} {patch_title}"
+    no_change_title = f"{NO_CHANGE_PREFIX} {patch_title}"
+
+    commit_already_exists = False
+    if onto:
+        if '/' in onto:
+            onto_remote, onto_ref = onto.split('/', 1)
+        else:
+            onto_ref = onto
+
+        try:
+            commits_in_range = list(repo.iter_commits(f"{onto_ref}..HEAD"))
+            for commit in commits_in_range:
+                commit_title = commit.message.split('\n')[0].strip()
+                if commit_title == already_applied_title or commit_title == no_change_title:
+                    commit_already_exists = True
+                    prefix = ALREADY_APPLIED_PREFIX if commit_title == already_applied_title else NO_CHANGE_PREFIX
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: {prefix} commit already exists for {patch_ref[:8]}")
+                    break
+        except git.exc.GitCommandError:
+            pass
+
+    if commit_already_exists:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "commit already exists (skipped)", needs_push=False)
+
+    try:
+        repo.git.cherry_pick('--abort')
+        repo.git.reset('--hard', 'HEAD')
+    except:
+        pass
+
+    if existing_commit:
+        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
+        commit_prefix = ALREADY_APPLIED_PREFIX
+        commit_msg = f"{ALREADY_APPLIED_PREFIX} {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
+        success_msg = f"{ALREADY_APPLIED_PREFIX} commit created successfully"
+    else:
+        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found - using {NO_CHANGE_PREFIX}")
+        commit_prefix = NO_CHANGE_PREFIX
+        commit_msg = f"{NO_CHANGE_PREFIX} {patch_title}\n\nCherry-pick resulted in no changes - commit may no longer be applicable\nCherry-picked from: {patch_ref}"
+        success_msg = f"{NO_CHANGE_PREFIX} commit created successfully"
+
+    try:
+        author_name = original_commit.author.name
+        author_email = original_commit.author.email
+        author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
+
+        repo.git.commit('--allow-empty', '-m', commit_msg,
+                       f'--author={author_name} <{author_email}>',
+                       f'--date={author_date}')
+        cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {commit_prefix} commit for {patch_ref[:8]}")
+
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, success_msg, needs_push=True)
+    except git.exc.GitCommandError as commit_error:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {commit_prefix} commit: {str(commit_error)}")
+
+
+def handle_cherry_pick_error(error_msg, repo, patch_ref, cherry_picker, mapping, patch_url):
+    """Handle cherry-pick git command errors."""
+    if cherry_picker:
+        with cherry_picker.conflict_lock:
+            cherry_picker.conflicted_repos.add(mapping.local_path)
+
+    if "is a merge but no -m option was given" in error_msg:
+        try:
+            repo.git.cherry_pick(patch_ref, '-m', '1', '--no-edit')
+            if cherry_picker:
+                with cherry_picker.conflict_lock:
+                    cherry_picker.conflicted_repos.discard(mapping.local_path)
+            return None
+        except git.exc.GitCommandError as e2:
+            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick failed (merge commit): {str(e2)}")
+    elif "bad object" in error_msg or "unknown revision" in error_msg:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"commit not found in AOSP repository (may be different repo)")
+    else:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick failed: {error_msg}")
+
+
+def handle_lfs_cleanup_if_needed(project_path, mapping, patch_ref, patch_url, dry_run):
+    """Handle LFS cleanup if repository has LFS configuration."""
+    lfsconfig_exists = (project_path / ".lfsconfig").exists()
+    gitattributes_has_lfs = False
+
+    gitattributes_path = project_path / ".gitattributes"
+    if gitattributes_path.exists():
+        with open(gitattributes_path, 'r') as f:
+            gitattributes_has_lfs = 'merge=lfs' in f.read()
+
+    had_lfs = lfsconfig_exists or gitattributes_has_lfs
+    if had_lfs:
+        lfs_success, lfs_msg = handle_lfs_cleanup(project_path, dry_run)
+        if not lfs_success:
+            return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick succeeded but LFS cleanup failed: {lfs_msg}")
+    return had_lfs, None
+
+
+def create_push_command(onto, security_patch_level, branch_name, mapping):
+    """Create appropriate push command based on branching strategy."""
+    if onto and (security_patch_level or branch_name):
+        target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
+        return f"git push {mapping.remote} {target_branch_name}"
+    else:
+        target_branch = mapping.revision
+        return f"git push {mapping.remote} HEAD:{target_branch}"
+
+
 def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picker: 'BulletinCherryPicker' = None, progress=None, bucket_task=None) -> CherryPickResult:
     """Perform cherry-pick operation for a single patch."""
     mapping = task.project_mapping
@@ -207,173 +460,55 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
     project_path = get_android_top() / mapping.local_path
 
-    # Check if this repository is in conflict state
-    if cherry_picker and not dry_run:
-        with cherry_picker.conflict_lock:
-            if mapping.local_path in cherry_picker.conflicted_repos:
-                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "skipped due to previous conflict in this repository", verbose_only=True)
+    conflict_result = check_conflict_state(cherry_picker, mapping, patch_ref, patch_url, dry_run)
+    if conflict_result:
+        return conflict_result
 
     if not project_path.exists():
         return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "directory not found")
 
     try:
-        # Acquire repository lock to prevent concurrent git operations
         with GitRepoLock(project_path):
             repo = git.Repo(project_path)
 
-            # Check if there's already a merge conflict in progress
-            if repo.git.status('--porcelain').strip():
-                try:
-                    # Check if we're in the middle of a merge/cherry-pick
-                    merge_head_path = project_path / ".git" / "MERGE_HEAD"
-                    cherry_pick_head_path = project_path / ".git" / "CHERRY_PICK_HEAD"
-
-                    if merge_head_path.exists() or cherry_pick_head_path.exists():
-                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "repository has unresolved merge conflict - resolve or abort first")
-
-                    # Check for unstaged changes that could interfere
-                    status_output = repo.git.status('--porcelain')
-                    if any(line.startswith(('UU', 'AA', 'DD')) for line in status_output.split('\n')):
-                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "repository has unresolved merge conflicts")
-
-                except Exception:
-                    # If we can't check status, assume there might be conflicts
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "unable to check repository status for conflicts")
+            merge_conflict_result = check_merge_conflicts(repo, project_path, mapping, patch_ref, patch_url)
+            if merge_conflict_result:
+                return merge_conflict_result
 
             if dry_run:
-                # Check current branch and status for better dry-run info
-                try:
-                    current_branch = repo.active_branch.name
-                except TypeError:
-                    current_branch = "detached HEAD"
+                return create_dry_run_result(mapping, patch_ref, patch_url, project_path, onto, security_patch_level, branch_name)
 
-                # Check if repo is shallow
-                is_shallow = GitOperations.is_shallow_repo(project_path)
-                shallow_info = " (shallow repo - would unshallow)" if is_shallow else ""
+            try:
+                aosp_remote = setup_repository(repo, mapping, project_path)
+            except Exception as e:
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, str(e))
 
-                # Check for LFS
-                lfsconfig_exists = (project_path / ".lfsconfig").exists()
-                gitattributes_has_lfs = False
-                gitattributes_path = project_path / ".gitattributes"
-                if gitattributes_path.exists():
-                    with open(gitattributes_path, 'r') as f:
-                        gitattributes_has_lfs = 'merge=lfs' in f.read()
-                lfs_info = " (has LFS - would cleanup)" if (lfsconfig_exists or gitattributes_has_lfs) else ""
-
-                # Add branch info if applicable
-                branch_info = ""
-                if onto and (security_patch_level or branch_name):
-                    target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
-                    branch_info = f" onto branch {target_branch_name}"
-
-                return CherryPickResult(
-                    mapping.local_path,
-                    patch_ref,
-                    patch_url,
-                    True,
-                    f"would cherry-pick {patch_ref[:12]} from {mapping.aosp_name}{branch_info}{shallow_info}{lfs_info}"
-                )
-
-            # Add/update AOSP remote
-            aosp_remote = ensure_aosp_remote(repo, mapping.aosp_name)
-
-            # Check if shallow and unshallow if needed
-            if GitOperations.is_shallow_repo(project_path):
-                try:
-                    repo = git.Repo(project_path)
-                    # Unshallow from the main remote first
-                    repo.git.fetch(mapping.remote, "--unshallow")
-                except Exception as e:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to unshallow repository: {str(e)}")
-
-            # Determine the target branch
             used_existing_branch = False
             if onto and (security_patch_level or branch_name):
-                # Parse onto parameter - remote/ref format is required
-                if '/' not in onto:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"--onto parameter must be in format 'remote/ref', got: {onto}")
-
-                parts = onto.split('/', 1)
-                onto_remote = parts[0]
-                onto_ref = parts[1]
-
-                # Ensure the remote exists and is added
-                try:
-                    if onto_remote == 'aosp':
-                        # Ensure AOSP remote exists
-                        remote_obj = ensure_aosp_remote(repo, mapping.aosp_name)
-                    else:
-                        # Try to get the remote
-                        remote_obj = safe_get_remote(repo, onto_remote)
-                        if not remote_obj:
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"remote '{onto_remote}' not found for onto parameter")
-
-                    # Fetch the specific ref from the remote to ensure we have it
-                    remote_obj.fetch(refspec=onto_ref)
-                except Exception as e:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to fetch from remote '{onto_remote}': {str(e)}")
-
-                # Use custom branch name if provided, otherwise generate ASB branch name using only the ref part
-                base_onto_ref = onto_ref
-                target_branch_name = branch_name if branch_name else f"{base_onto_ref}-ASB-{security_patch_level}"
-
-                try:
-                    current_branch = repo.active_branch.name
-                except TypeError:
-                    current_branch = None
-
-                # Branch setup is handled upfront by setup_branches method
+                onto_ref, error_result = setup_onto_branch(repo, onto, mapping, patch_ref, patch_url)
+                if error_result:
+                    return error_result
             else:
-                # Original logic - use mapping.revision
-                try:
-                    current_branch = repo.active_branch.name
-                except TypeError:
-                    current_branch = None
+                error_result = setup_default_branch(repo, mapping, patch_ref, patch_url)
+                if error_result:
+                    return error_result
 
-                target_branch = mapping.revision
-
-                if current_branch != target_branch:
-                    try:
-                        # Try to checkout existing branch
-                        repo.git.checkout(target_branch)
-                    except git.exc.GitCommandError:
-                        try:
-                            # Create and checkout new branch tracking remote
-                            remote_ref = f"{mapping.remote}/{target_branch}"
-                            repo.git.fetch(mapping.remote)
-                            repo.git.checkout('-b', target_branch, remote_ref)
-                            branch = repo.heads[target_branch]
-                            branch.set_tracking_branch(repo.remotes[mapping.remote].refs[target_branch])
-                        except git.exc.GitCommandError as e:
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout branch {target_branch}: {str(e)}")
-
-            # Perform the cherry-pick
             try:
-                # Update bucket progress to show fetching
                 if progress and bucket_task:
                     progress.update(bucket_task, description=f"[yellow]Fetching {mapping.local_path} ({patch_ref[:12]})")
 
-                # Fetch from AOSP to get the commit
                 aosp_remote = safe_get_remote(repo, 'aosp')
                 if not aosp_remote:
                     return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "aosp remote not found")
                 aosp_remote.fetch()
 
-                # Update bucket progress to show cherry-picking
                 if progress and bucket_task:
                     progress.update(bucket_task, description=f"[green]Cherry-picking {mapping.local_path} ({patch_ref[:12]})")
 
-                # Check if commit already exists in current branch
-                try:
-                    # Check if the commit is already in the current branch history
-                    repo.git.merge_base('--is-ancestor', patch_ref, 'HEAD')
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "patch already applied (skipped)", needs_push=False)
-                except git.exc.GitCommandError:
-                    # Commit is not in current branch, proceed with cherry-pick
-                    pass
+                existing_commit_result = check_existing_commit(repo, patch_ref, mapping, patch_url)
+                if existing_commit_result:
+                    return existing_commit_result
 
-                # Use fuzzy matching to find similar commits (>90% similarity)
-                # When using --onto, only search in the upstream ref to avoid finding our own recent commits
                 until_ref = onto_ref if onto else None
                 existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9, until_ref=until_ref)
                 if existing_commit:
@@ -381,140 +516,27 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 else:
                     cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
 
-                # Try cherry-pick
                 try:
                     repo.git.cherry_pick(patch_ref, '--no-edit')
                 except git.exc.GitCommandError as cherry_pick_error:
                     error_msg = str(cherry_pick_error)
-
-                    # Check if it's just empty changes
                     is_empty_cherrypick = ("nothing to commit" in error_msg.lower() or "no changes added to commit" in error_msg.lower() or "would result in an empty commit" in error_msg.lower() or "the previous cherry-pick is now empty" in error_msg.lower())
 
                     if is_empty_cherrypick:
-                        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
-                        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
-
-                        # Check if we've already created an [ALREADY APPLIED] or [NO CHANGE] commit for this patch
-                        original_commit = repo.commit(patch_ref)
-                        patch_title = original_commit.message.split('\n')[0].strip()
-                        already_applied_title = f"{ALREADY_APPLIED_PREFIX} {patch_title}"
-                        no_change_title = f"{NO_CHANGE_PREFIX} {patch_title}"
-
-                        commit_already_exists = False
-                        if onto:
-                            # Parse onto to get the ref
-                            if '/' in onto:
-                                onto_remote, onto_ref = onto.split('/', 1)
-                            else:
-                                onto_ref = onto
-
-                            # Check if the [ALREADY APPLIED] or [NO CHANGE] title already exists in the range
-                            # Do this in Python to avoid git grep pattern issues with special characters
-                            try:
-                                commits_in_range = list(repo.iter_commits(f"{onto_ref}..HEAD"))
-                                for commit in commits_in_range:
-                                    commit_title = commit.message.split('\n')[0].strip()
-                                    if commit_title == already_applied_title or commit_title == no_change_title:
-                                        commit_already_exists = True
-                                        prefix = ALREADY_APPLIED_PREFIX if commit_title == already_applied_title else NO_CHANGE_PREFIX
-                                        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: {prefix} commit already exists for {patch_ref[:8]}")
-                                        break
-                            except git.exc.GitCommandError:
-                                pass
-
-                        if commit_already_exists:
-                            # Skip creating another commit
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "commit already exists (skipped)", needs_push=False)
-
-                        # Abort the cherry-pick and clean up
-                        try:
-                            repo.git.cherry_pick('--abort')
-                            repo.git.reset('--hard', 'HEAD')
-                        except:
-                            pass
-
-                        # Determine commit type and message based on evidence
-                        if existing_commit:
-                            # We found a similar commit via fuzzy matching - this is [ALREADY APPLIED]
-                            cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
-                            commit_prefix = ALREADY_APPLIED_PREFIX
-                            commit_msg = f"{ALREADY_APPLIED_PREFIX} {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
-                            success_msg = f"{ALREADY_APPLIED_PREFIX} commit created successfully"
-                        else:
-                            # No similar commit found - this is [NO CHANGE] (empty cherry-pick with no evidence of existing commit)
-                            cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found - using {NO_CHANGE_PREFIX}")
-                            commit_prefix = NO_CHANGE_PREFIX
-                            commit_msg = f"{NO_CHANGE_PREFIX} {patch_title}\n\nCherry-pick resulted in no changes - commit may no longer be applicable\nCherry-picked from: {patch_ref}"
-                            success_msg = f"{NO_CHANGE_PREFIX} commit created successfully"
-
-                        # Create empty commit
-                        try:
-                            # Use original author and author date
-                            author_name = original_commit.author.name
-                            author_email = original_commit.author.email
-                            author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
-
-                            repo.git.commit('--allow-empty', '-m', commit_msg,
-                                           f'--author={author_name} <{author_email}>',
-                                           f'--date={author_date}')
-                            cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {commit_prefix} commit for {patch_ref[:8]}")
-
-                            # Return success for both [ALREADY APPLIED] and [NO CHANGE] commits
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, success_msg, needs_push=True)
-                        except git.exc.GitCommandError as commit_error:
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {commit_prefix} commit: {str(commit_error)}")
+                        return handle_empty_cherry_pick(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url, onto)
                     else:
-                        # Re-raise the original error for normal handling
                         raise cherry_pick_error
 
             except git.exc.GitCommandError as e:
-                error_msg = str(e)
+                error_result = handle_cherry_pick_error(str(e), repo, patch_ref, cherry_picker, mapping, patch_url)
+                if error_result:
+                    return error_result
 
-                # Mark this repository as conflicted for future cherry-picks
-                if cherry_picker and not dry_run:
-                    with cherry_picker.conflict_lock:
-                        cherry_picker.conflicted_repos.add(mapping.local_path)
+            had_lfs, lfs_error_result = handle_lfs_cleanup_if_needed(project_path, mapping, patch_ref, patch_url, dry_run)
+            if lfs_error_result:
+                return lfs_error_result
 
-                if "is a merge but no -m option was given" in error_msg:
-                    try:
-                        # Try cherry-picking merge commit with -m 1
-                        repo.git.cherry_pick(patch_ref, '-m', '1', '--no-edit')
-                        # If successful, remove from conflicted repos
-                        if cherry_picker and not dry_run:
-                            with cherry_picker.conflict_lock:
-                                cherry_picker.conflicted_repos.discard(mapping.local_path)
-                    except git.exc.GitCommandError as e2:
-                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick failed (merge commit): {str(e2)}")
-                elif "bad object" in error_msg or "unknown revision" in error_msg:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"commit not found in AOSP repository (may be different repo)")
-                else:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick failed: {error_msg}")
-
-            # Handle LFS cleanup if needed
-            had_lfs = False
-            lfsconfig_exists = (project_path / ".lfsconfig").exists()
-            gitattributes_has_lfs = False
-
-            gitattributes_path = project_path / ".gitattributes"
-            if gitattributes_path.exists():
-                with open(gitattributes_path, 'r') as f:
-                    gitattributes_has_lfs = 'merge=lfs' in f.read()
-
-            if lfsconfig_exists or gitattributes_has_lfs:
-                had_lfs = True
-                lfs_success, lfs_msg = handle_lfs_cleanup(project_path, dry_run)
-                if not lfs_success:
-                    return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"cherry-pick succeeded but LFS cleanup failed: {lfs_msg}")
-
-            # Prepare push command for later execution
-            if onto and (security_patch_level or branch_name):
-                # For ASB/custom branches, push the current branch
-                target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
-                push_cmd = f"git push {mapping.remote} {target_branch_name}"
-            else:
-                # Original logic for regular branches
-                target_branch = mapping.revision
-                push_cmd = f"git push {mapping.remote} HEAD:{target_branch}"
+            push_cmd = create_push_command(onto, security_patch_level, branch_name, mapping)
 
             return CherryPickResult(
                 mapping.local_path,
@@ -552,21 +574,75 @@ class BulletinCherryPicker:
         if self.verbose:
             console.print(message)
 
+    def get_unique_repos_from_tasks(self, tasks: List[CherryPickTask]):
+        """Extract unique repository paths from tasks."""
+        unique_repos = set()
+        for task in tasks:
+            unique_repos.add(task.project_mapping.local_path)
+        return unique_repos
+
+    def determine_checkout_ref(self, repo, onto_ref):
+        """Determine the appropriate checkout reference (tag or remote/ref)."""
+        try:
+            repo.git.show_ref('--tags', f'refs/tags/{onto_ref}')
+            return onto_ref  # It's a tag
+        except git.exc.GitCommandError:
+            return self.onto  # Use remote/ref format
+
+    def setup_single_repository_branch(self, repo_path, onto_ref):
+        """Setup branch in a single repository."""
+        try:
+            import git
+            from pathlib import Path
+            project_path = Path(self.top) / repo_path
+            if not project_path.exists():
+                return
+
+            repo = git.Repo(project_path)
+
+            existing_branch = None
+            for branch in repo.branches:
+                if branch.name == self.branch_name:
+                    existing_branch = branch
+                    break
+
+            checkout_ref = self.determine_checkout_ref(repo, onto_ref)
+
+            current_branch = None
+            try:
+                current_branch = repo.active_branch.name
+            except TypeError:
+                pass
+
+            if existing_branch:
+                if self.force_recreate:
+                    if current_branch != self.branch_name:
+                        repo.git.checkout(self.branch_name)
+                    repo.git.reset('--hard', checkout_ref)
+                    self.verbose_print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
+                else:
+                    if current_branch != self.branch_name:
+                        repo.git.checkout(self.branch_name)
+                        self.verbose_print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
+                    else:
+                        self.verbose_print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
+            else:
+                repo.git.checkout('-b', self.branch_name, checkout_ref)
+                self.verbose_print(f"  [yellow]→[/yellow] Created {repo_path}:{self.branch_name} from {checkout_ref}")
+
+        except Exception as e:
+            self.verbose_print(f"  [red]→[/red] Failed to setup branch in {repo_path}: {str(e)}")
+
     def setup_branches(self, tasks: List[CherryPickTask], project_mappings: Dict[str, ProjectMapping]):
         """Setup branches in all repositories that will be cherry-picked to."""
         if not self.onto or not self.branch_name:
             return
 
-        # Parse the onto parameter
-        if '/' in self.onto:
-            onto_remote, onto_ref = self.onto.split('/', 1)
-        else:
-            return  # Invalid onto format
+        if '/' not in self.onto:
+            return
 
-        # Get unique repositories from tasks
-        unique_repos = set()
-        for task in tasks:
-            unique_repos.add(task.project_mapping.local_path)
+        onto_remote, onto_ref = self.onto.split('/', 1)
+        unique_repos = self.get_unique_repos_from_tasks(tasks)
 
         if self.force_recreate:
             console.print(f"[cyan]Recreating branch '{self.branch_name}' in {len(unique_repos)} repositories...[/cyan]")
@@ -574,61 +650,7 @@ class BulletinCherryPicker:
             console.print(f"[cyan]Setting up branches in {len(unique_repos)} repositories...[/cyan]")
 
         for repo_path in unique_repos:
-            try:
-                import git
-                from pathlib import Path
-                project_path = Path(self.top) / repo_path
-                if not project_path.exists():
-                    continue
-
-                repo = git.Repo(project_path)
-
-                # Check if the branch exists
-                existing_branch = None
-                for branch in repo.branches:
-                    if branch.name == self.branch_name:
-                        existing_branch = branch
-                        break
-
-                # Check if the ref is a tag (tags don't use remote prefix)
-                is_tag = False
-                try:
-                    repo.git.show_ref('--tags', f'refs/tags/{onto_ref}')
-                    is_tag = True
-                except git.exc.GitCommandError:
-                    pass
-
-                checkout_ref = onto_ref if is_tag else self.onto
-
-                # Check current branch
-                current_branch = None
-                try:
-                    current_branch = repo.active_branch.name
-                except TypeError:
-                    pass
-
-                if existing_branch:
-                    # Branch exists
-                    if self.force_recreate:
-                        # Force recreate: checkout and reset it
-                        if current_branch != self.branch_name:
-                            repo.git.checkout(self.branch_name)
-                        repo.git.reset('--hard', checkout_ref)
-                        self.verbose_print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
-                    else:
-                        # Just checkout existing branch if not already on it
-                        if current_branch != self.branch_name:
-                            repo.git.checkout(self.branch_name)
-                            self.verbose_print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
-                        else:
-                            self.verbose_print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
-                else:
-                    # Branch doesn't exist, create and checkout it
-                    repo.git.checkout('-b', self.branch_name, checkout_ref)
-                    self.verbose_print(f"  [yellow]→[/yellow] Created {repo_path}:{self.branch_name} from {checkout_ref}")
-
-            except Exception as e:
-                self.verbose_print(f"  [red]→[/red] Failed to recreate branch in {repo_path}: {str(e)}")
+            self.setup_single_repository_branch(repo_path, onto_ref)
 
     def update_security_patch_level(self, latest_bulletin_date: str):
         """Update security patch level after successful cherry-picking."""
@@ -749,10 +771,70 @@ value {{
 
         return tasks
 
+    def get_pushable_picks(self, successful_picks: List[CherryPickResult]):
+        """Filter results that need pushing."""
+        return [pick for pick in successful_picks if pick.needs_push and pick.push_command]
+
+    def get_xos_remote_url(self, manifest_path: Optional[Path]):
+        """Extract XOS remote URL from manifest."""
+        if not manifest_path:
+            return None
+
+        try:
+            manifest = ManifestParser(manifest_path)
+            xos_remote_config = manifest.get_remote_config("XOS")
+            if xos_remote_config and xos_remote_config.get('fetch'):
+                return xos_remote_config['fetch']
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not parse manifest for remote info: {e}[/yellow]")
+        return None
+
+    def ensure_remote_repository_exists(self, result, xos_remote_url):
+        """Create remote repository if it doesn't exist."""
+        push_parts = result.push_command.split()
+        remote_name = push_parts[2] if len(push_parts) > 2 else "XOS"
+
+        if xos_remote_url and remote_name == "XOS":
+            project_path = self.top / result.project_path
+            repo = git.Repo(project_path)
+            repo_name = get_project_path(result.project_path)
+            remote_repo_url = f"{xos_remote_url}/{repo_name}"
+
+            try:
+                repo.git.ls_remote(remote_repo_url)
+            except git.exc.GitCommandError:
+                console.print(f"[yellow]Repository {repo_name} does not exist, creating...[/yellow]")
+                if not create_xos_repo(repo_name):
+                    return False, "Failed to create repository"
+                console.print(f"[green]✓[/green] Created repository {repo_name}")
+        return True, None
+
+    def execute_single_push(self, result):
+        """Execute push for a single repository."""
+        try:
+            project_path = self.top / result.project_path
+            push_result = subprocess.run(
+                result.push_command,
+                shell=True,
+                cwd=project_path,
+                capture_output=True,
+                text=True
+            )
+
+            if push_result.returncode == 0:
+                console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
+                return True, None
+            else:
+                console.print(f"[red]✗[/red] {result.project_path}: Push failed: {push_result.stderr}")
+                return False, push_result.stderr
+
+        except Exception as e:
+            console.print(f"[red]✗[/red] {result.project_path}: Push exception: {e}")
+            return False, str(e)
+
     def execute_pushes(self, successful_picks: List[CherryPickResult], manifest_path: Optional[Path] = None) -> Tuple[int, List[Tuple[str, str]]]:
         """Execute all push operations at the end."""
-        # Filter out results that don't need pushing (e.g., already applied patches)
-        pushable_picks = [pick for pick in successful_picks if pick.needs_push and pick.push_command]
+        pushable_picks = self.get_pushable_picks(successful_picks)
 
         if self.dry_run:
             console.print(f"[blue][DRY RUN] Would push {len(pushable_picks)} repositories[/blue]")
@@ -762,17 +844,7 @@ value {{
             console.print("[blue]No repositories need pushing (all patches were already applied)[/blue]")
             return 0, []
 
-        # Parse manifest to get XOS remote configuration
-        xos_remote_url = None
-        if manifest_path:
-            try:
-                manifest = ManifestParser(manifest_path)
-                xos_remote_config = manifest.get_remote_config("XOS")
-                if xos_remote_config and xos_remote_config.get('fetch'):
-                    xos_remote_url = xos_remote_config['fetch']
-            except Exception as e:
-                console.print(f"[yellow]Warning: Could not parse manifest for remote info: {e}[/yellow]")
-
+        xos_remote_url = self.get_xos_remote_url(manifest_path)
         console.print(f"\n[bold cyan]Pushing {len(pushable_picks)} repositories with new cherry-picks...[/bold cyan]")
 
         push_successes = 0
@@ -790,51 +862,18 @@ value {{
             push_task = progress.add_task("[cyan]Pushing changes", total=len(pushable_picks))
 
             for result in pushable_picks:
-                try:
-                    project_path = self.top / result.project_path
-                    repo = git.Repo(project_path)
+                repo_created, create_error = self.ensure_remote_repository_exists(result, xos_remote_url)
+                if not repo_created:
+                    push_failures.append((result.project_path, create_error))
+                    console.print(f"[red]✗[/red] {result.project_path}: {create_error}")
+                    progress.update(push_task, advance=1)
+                    continue
 
-                    # Extract remote name from push command (e.g., "git push XOS branch" -> "XOS")
-                    push_parts = result.push_command.split()
-                    remote_name = push_parts[2] if len(push_parts) > 2 else "XOS"
-
-                    # Check if remote repository exists if we have the base URL
-                    if xos_remote_url and remote_name == "XOS":
-                        repo_name = get_project_path(result.project_path)
-                        remote_repo_url = f"{xos_remote_url}/{repo_name}"
-
-                        try:
-                            # Try to ls-remote the repository
-                            repo.git.ls_remote(remote_repo_url)
-                        except git.exc.GitCommandError:
-                            # Repository doesn't exist - create it
-                            console.print(f"[yellow]Repository {repo_name} does not exist, creating...[/yellow]")
-                            if not create_xos_repo(repo_name):
-                                push_failures.append((result.project_path, "Failed to create repository"))
-                                console.print(f"[red]✗[/red] {result.project_path}: Failed to create repository")
-                                progress.update(push_task, advance=1)
-                                continue
-                            console.print(f"[green]✓[/green] Created repository {repo_name}")
-
-                    # Execute push command
-                    push_result = subprocess.run(
-                        result.push_command,
-                        shell=True,
-                        cwd=project_path,
-                        capture_output=True,
-                        text=True
-                    )
-
-                    if push_result.returncode == 0:
-                        push_successes += 1
-                        console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
-                    else:
-                        push_failures.append((result.project_path, push_result.stderr))
-                        console.print(f"[red]✗[/red] {result.project_path}: Push failed: {push_result.stderr}")
-
-                except Exception as e:
-                    push_failures.append((result.project_path, str(e)))
-                    console.print(f"[red]✗[/red] {result.project_path}: Push exception: {e}")
+                success, error = self.execute_single_push(result)
+                if success:
+                    push_successes += 1
+                else:
+                    push_failures.append((result.project_path, error))
 
                 progress.update(push_task, advance=1)
 
@@ -877,143 +916,129 @@ value {{
 
         return successful_picks, failed_picks
 
+    def create_success_table(self, successful_picks: List[CherryPickResult]):
+        """Create and populate table for successful cherry-picks."""
+        table = Table(show_header=True, header_style="bold blue")
+        table.add_column("Project", style="cyan", no_wrap=True)
+        table.add_column("Patch", style="yellow", no_wrap=True)
+        table.add_column("Message", style="green")
+        table.add_column("Branch", style="magenta", no_wrap=True)
+        table.add_column("", width=2)
+
+        for result in successful_picks:
+            emoji = "✅" if result.needs_push else "⏭️"
+            branch_status = "existing" if result.used_existing_branch else "new"
+            table.add_row(
+                truncate_project_name(result.project_path),
+                result.patch_ref[:12],
+                result.message,
+                branch_status,
+                emoji
+            )
+        return table
+
+    def create_failure_table(self, failed_picks: List[CherryPickResult]):
+        """Create and populate table for failed cherry-picks."""
+        fail_table = Table(show_header=True, header_style="bold red")
+        fail_table.add_column("Project", style="cyan", no_wrap=True)
+        fail_table.add_column("Patch", style="yellow", no_wrap=True)
+        fail_table.add_column("Error", style="red")
+        fail_table.add_column("", width=2)
+
+        for result in failed_picks:
+            fail_table.add_row(
+                truncate_project_name(result.project_path),
+                result.patch_ref[:12],
+                result.message,
+                "❌"
+            )
+        return fail_table
+
     def display_cherry_pick_results(self, successful_picks: List[CherryPickResult], failed_picks: List[CherryPickResult]):
         """Display cherry-pick results in a formatted table."""
         if not successful_picks and not failed_picks:
             return
 
-        # Display successful cherry-picks
         if successful_picks:
             console.print(f"\n[bold green]Successful cherry-picks ({len(successful_picks)}):[/bold green]")
+            success_table = self.create_success_table(successful_picks)
+            console.print(success_table)
 
-            table = Table(show_header=True, header_style="bold blue")
-            table.add_column("Project", style="cyan", no_wrap=True)
-            table.add_column("Patch", style="yellow", no_wrap=True)
-            table.add_column("Message", style="green")
-            table.add_column("Branch", style="magenta", no_wrap=True)
-            table.add_column("", width=2)  # Status column for emoji
-
-            for result in successful_picks:
-                emoji = "✅" if result.needs_push else "⏭️"  # Skip emoji for already applied patches
-                branch_status = "existing" if result.used_existing_branch else "new"
-                table.add_row(
-                    truncate_project_name(result.project_path),
-                    result.patch_ref[:12],  # Show first 12 chars of commit hash
-                    result.message,
-                    branch_status,
-                    emoji
-                )
-
-            console.print(table)
-
-        # Display failed cherry-picks
         if failed_picks:
             console.print(f"\n[bold red]Failed cherry-picks ({len(failed_picks)}):[/bold red]")
+            failure_table = self.create_failure_table(failed_picks)
+            console.print(failure_table)
 
-            fail_table = Table(show_header=True, header_style="bold red")
-            fail_table.add_column("Project", style="cyan", no_wrap=True)
-            fail_table.add_column("Patch", style="yellow", no_wrap=True)
-            fail_table.add_column("Error", style="red")
-            fail_table.add_column("", width=2)  # Status column for emoji
+    def fetch_all_bulletin_data(self):
+        """Fetch bulletin data from all specified dates."""
+        all_bulletin_data = []
+        all_patches = []
 
-            for result in failed_picks:
-                fail_table.add_row(
-                    truncate_project_name(result.project_path),
-                    result.patch_ref[:12],
-                    result.message,
-                    "❌"
-                )
+        for bulletin_date in self.bulletin_dates:
+            console.print(f"[cyan]Fetching security bulletin for {bulletin_date}...[/cyan]")
+            bulletin_data = get_bulletin_patches(bulletin_date)
+            all_bulletin_data.extend(bulletin_data)
 
-            console.print(fail_table)
+            console.print(f"[cyan]Filtering patches for Android {self.android_version} from {bulletin_date}...[/cyan]")
+            patches = filter_patches_by_android_version(bulletin_data, self.android_version)
+            all_patches.extend(patches)
 
-    def run(self):
-        """Main execution flow."""
-        try:
-            # Fetch bulletin patches from multiple dates
-            all_bulletin_data = []
-            all_patches = []
+            if patches:
+                console.print(f"[green]Found {len(patches)} patches for Android {self.android_version} in {bulletin_date}[/green]")
+            else:
+                console.print(f"[yellow]No patches found for Android {self.android_version} in {bulletin_date}[/yellow]")
 
-            for bulletin_date in self.bulletin_dates:
-                console.print(f"[cyan]Fetching security bulletin for {bulletin_date}...[/cyan]")
-                bulletin_data = get_bulletin_patches(bulletin_date)
-                all_bulletin_data.extend(bulletin_data)
+        if not all_patches:
+            console.print(f"[yellow]No patches found for Android {self.android_version} in any of the specified bulletins[/yellow]")
+            return None, None
 
-                # Filter patches for Android version
-                console.print(f"[cyan]Filtering patches for Android {self.android_version} from {bulletin_date}...[/cyan]")
-                patches = filter_patches_by_android_version(bulletin_data, self.android_version)
-                all_patches.extend(patches)
+        console.print(f"[green]Total patches found: {len(all_patches)} across {len(self.bulletin_dates)} bulletins[/green]")
+        console.print(f"[green]Processing {len(all_patches)} patches for Android {self.android_version}[/green]")
 
-                if patches:
-                    console.print(f"[green]Found {len(patches)} patches for Android {self.android_version} in {bulletin_date}[/green]")
-                else:
-                    console.print(f"[yellow]No patches found for Android {self.android_version} in {bulletin_date}[/yellow]")
+        return all_bulletin_data, all_patches
 
-            if not all_patches:
-                console.print(f"[yellow]No patches found for Android {self.android_version} in any of the specified bulletins[/yellow]")
-                return 0
+    def prepare_cherry_pick_tasks(self, bulletin_data, patches):
+        """Generate manifest and create cherry-pick tasks."""
+        self.verbose_print("[cyan]Generating temporary manifest file...[/cyan]")
+        manifest_path = self.generate_manifest()
 
-            console.print(f"[green]Total patches found: {len(all_patches)} across {len(self.bulletin_dates)} bulletins[/green]")
+        self.verbose_print("[cyan]Building project mappings from manifest...[/cyan]")
+        project_mappings = build_project_mappings(manifest_path)
+        self.verbose_print(f"[green]Built {len(project_mappings)} project mappings[/green]")
 
-            # Use the combined data for processing
-            bulletin_data = all_bulletin_data
-            patches = all_patches
+        self.verbose_print("[cyan]Creating cherry-pick tasks...[/cyan]")
+        tasks = self.create_cherry_pick_tasks(bulletin_data, patches, project_mappings)
+        self.verbose_print(f"[green]Created {len(tasks)} cherry-pick tasks[/green]")
 
-            console.print(f"[green]Processing {len(patches)} patches for Android {self.android_version}[/green]")
+        if self.onto and self.branch_name:
+            if self.force_recreate:
+                console.print(f"[cyan]Force recreating branches in all repositories...[/cyan]")
+            else:
+                console.print(f"[cyan]Setting up branches in all repositories...[/cyan]")
+            self.setup_branches(tasks, project_mappings)
 
-        except Exception as e:
-            console.print(f"[red]Failed to fetch bulletin data: {e}[/red]")
-            return 1
+        return manifest_path, tasks
 
-        # Generate manifest and parse projects
-        try:
-            self.verbose_print("[cyan]Generating temporary manifest file...[/cyan]")
-            manifest_path = self.generate_manifest()
-
-            self.verbose_print("[cyan]Building project mappings from manifest...[/cyan]")
-            project_mappings = build_project_mappings(manifest_path)
-            self.verbose_print(f"[green]Built {len(project_mappings)} project mappings[/green]")
-
-            self.verbose_print("[cyan]Creating cherry-pick tasks...[/cyan]")
-            tasks = self.create_cherry_pick_tasks(bulletin_data, patches, project_mappings)
-            self.verbose_print(f"[green]Created {len(tasks)} cherry-pick tasks[/green]")
-
-            # Setup branches if using --onto (before any cherry-picking begins)
-            if self.onto and self.branch_name:
-                if self.force_recreate:
-                    console.print(f"[cyan]Force recreating branches in all repositories...[/cyan]")
-                else:
-                    console.print(f"[cyan]Setting up branches in all repositories...[/cyan]")
-                self.setup_branches(tasks, project_mappings)
-
-        except Exception as e:
-            console.print(f"[red]Failed to prepare cherry-pick tasks: {e}[/red]")
-            return 1
-
-        # Process cherry-picks (skip if push-only mode)
+    def execute_cherry_picks_or_push_only(self, tasks):
+        """Execute cherry-picks or handle push-only mode."""
         if self.push_only:
             console.print(f"[blue]Push-only mode: Assuming all {len(tasks)} patches are already cherry-picked[/blue]")
-            # In push-only mode, we would need to scan for existing commits
-            # For now, we'll just skip cherry-picking
-            successful_picks = []
-            failed_picks = []
+            return [], []
         else:
-            successful_picks, failed_picks = self.process_cherry_picks(tasks)
+            return self.process_cherry_picks(tasks)
 
-        # Display results
-        self.display_cherry_pick_results(successful_picks, failed_picks)
-
-        # Execute pushes for successful cherry-picks (only when explicitly requested)
+    def handle_pushes(self, successful_picks, manifest_path):
+        """Handle push operations if needed."""
         push_successes = 0
         push_failures = []
 
-        # Only push when --push-only is specified
         if successful_picks and not self.dry_run and self.push_only:
             push_successes, push_failures = self.execute_pushes(successful_picks, manifest_path)
 
-        # Clean up temporary manifest
-        cleanup_manifest(manifest_path, self.dry_run)
+        return push_successes, push_failures
 
-        # Summary
+    def print_summary(self, successful_picks, failed_picks, push_successes, push_failures, tasks):
+        """Print final summary of operations."""
         console.print("\n" + "=" * 60)
         console.print("[bold]Security bulletin cherry-pick complete![/bold]")
         console.print(f"[green]Successfully cherry-picked:[/green] {len(successful_picks)}/{len(tasks)} patches")
@@ -1024,7 +1049,6 @@ value {{
         if failed_picks:
             console.print(f"\n[red]Failed cherry-picks ({len(failed_picks)}):[/red]")
             for result in failed_picks:
-                # Show message if it's not verbose-only, or if we're in verbose mode
                 if not result.verbose_only or self.verbose:
                     console.print(f"  [red]- {result.project_path} ({result.patch_ref[:12]}):[/red] {result.message}")
 
@@ -1033,16 +1057,39 @@ value {{
             for project_path, error in push_failures:
                 console.print(f"  [red]- {project_path}:[/red] {error}")
 
-        # Update security patch level if all cherry-picks were successful
+    def update_security_patch_level_if_successful(self, successful_picks, failed_picks):
+        """Update security patch level if all operations were successful."""
         if successful_picks and not failed_picks:
-            # Find the latest bulletin date from the processed dates
             latest_bulletin_date = max(self.bulletin_dates)
             console.print(f"\n[cyan]Updating security patch level to {latest_bulletin_date}...[/cyan]")
             self.update_security_patch_level(latest_bulletin_date)
 
-        console.print("\n[bold green]Everything done.[/bold green]")
+    def run(self):
+        """Main execution flow."""
+        try:
+            bulletin_data, patches = self.fetch_all_bulletin_data()
+            if not patches:
+                return 0
+        except Exception as e:
+            console.print(f"[red]Failed to fetch bulletin data: {e}[/red]")
+            return 1
 
-        # Return error code if there were failures
+        try:
+            manifest_path, tasks = self.prepare_cherry_pick_tasks(bulletin_data, patches)
+        except Exception as e:
+            console.print(f"[red]Failed to prepare cherry-pick tasks: {e}[/red]")
+            return 1
+
+        successful_picks, failed_picks = self.execute_cherry_picks_or_push_only(tasks)
+        self.display_cherry_pick_results(successful_picks, failed_picks)
+
+        push_successes, push_failures = self.handle_pushes(successful_picks, manifest_path)
+        cleanup_manifest(manifest_path, self.dry_run)
+
+        self.print_summary(successful_picks, failed_picks, push_successes, push_failures, tasks)
+        self.update_security_patch_level_if_successful(successful_picks, failed_picks)
+
+        console.print("\n[bold green]Everything done.[/bold green]")
         return 1 if (failed_picks or push_failures) else 0
 
 
