@@ -18,6 +18,10 @@ from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
 from rich.table import Table
+
+# Constants for commit prefixes
+ALREADY_APPLIED_PREFIX = "[ALREADY APPLIED]"
+NO_CHANGE_PREFIX = "[NO CHANGE]"
 from dataclasses import dataclass
 import threading
 import tempfile
@@ -315,12 +319,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 except TypeError:
                     current_branch = None
 
-                # Branch setup is handled upfront, just ensure we're on the right branch
-                if current_branch != target_branch_name:
-                    try:
-                        repo.git.checkout(target_branch_name)
-                    except git.exc.GitCommandError as e:
-                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout branch {target_branch_name}: {str(e)}")
+                # Branch setup is handled upfront by setup_branches method
             else:
                 # Original logic - use mapping.revision
                 try:
@@ -392,12 +391,13 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                         console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
                         console.print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
 
-                        # Check if we've already created an [ALREADY APPLIED] commit for this patch
+                        # Check if we've already created an [ALREADY APPLIED] or [NO CHANGE] commit for this patch
                         original_commit = repo.commit(patch_ref)
                         patch_title = original_commit.message.split('\n')[0].strip()
-                        already_applied_title = f"[ALREADY APPLIED] {patch_title}"
+                        already_applied_title = f"{ALREADY_APPLIED_PREFIX} {patch_title}"
+                        no_change_title = f"{NO_CHANGE_PREFIX} {patch_title}"
 
-                        already_applied_exists = False
+                        commit_already_exists = False
                         if onto:
                             # Parse onto to get the ref
                             if '/' in onto:
@@ -405,27 +405,23 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                             else:
                                 onto_ref = onto
 
-                            # Check if the [ALREADY APPLIED] title already exists in the range
+                            # Check if the [ALREADY APPLIED] or [NO CHANGE] title already exists in the range
+                            # Do this in Python to avoid git grep pattern issues with special characters
                             try:
-                                log_output = repo.git.log(f"{onto_ref}..HEAD", "--oneline", f"--grep={already_applied_title}")
-                                if log_output.strip():
-                                    already_applied_exists = True
-                                    console.print(f"  [yellow]→[/yellow] {mapping.local_path}: [ALREADY APPLIED] commit already exists for {patch_ref[:8]}")
+                                commits_in_range = list(repo.iter_commits(f"{onto_ref}..HEAD"))
+                                for commit in commits_in_range:
+                                    commit_title = commit.message.split('\n')[0].strip()
+                                    if commit_title == already_applied_title or commit_title == no_change_title:
+                                        commit_already_exists = True
+                                        prefix = ALREADY_APPLIED_PREFIX if commit_title == already_applied_title else NO_CHANGE_PREFIX
+                                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: {prefix} commit already exists for {patch_ref[:8]}")
+                                        break
                             except git.exc.GitCommandError:
                                 pass
 
-                        if already_applied_exists:
-                            # Skip creating another [ALREADY APPLIED] commit
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "[ALREADY APPLIED] commit already exists (skipped)", needs_push=False)
-
-                        # If we found a similar commit via fuzzy matching, use it
-                        if existing_commit:
-                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
-                            reference_commit = existing_commit
-                        else:
-                            # No similar commit found, use generic reference
-                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found")
-                            reference_commit = "unknown"
+                        if commit_already_exists:
+                            # Skip creating another commit
+                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "commit already exists (skipped)", needs_push=False)
 
                         # Abort the cherry-pick and clean up
                         try:
@@ -434,24 +430,36 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                         except:
                             pass
 
-                        # Create empty commit with [ALREADY APPLIED] prefix
-                        try:
-                            if reference_commit != "unknown":
-                                already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit was already applied in {reference_commit}\nCherry-picked from: {patch_ref}"
-                            else:
-                                already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit changes appear to already be present\nCherry-picked from: {patch_ref}"
+                        # Determine commit type and message based on evidence
+                        if existing_commit:
+                            # We found a similar commit via fuzzy matching - this is [ALREADY APPLIED]
+                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
+                            commit_prefix = ALREADY_APPLIED_PREFIX
+                            commit_msg = f"{ALREADY_APPLIED_PREFIX} {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
+                            success_msg = f"{ALREADY_APPLIED_PREFIX} commit created successfully"
+                        else:
+                            # No similar commit found - this is [NO CHANGE] (empty cherry-pick with no evidence of existing commit)
+                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found - using {NO_CHANGE_PREFIX}")
+                            commit_prefix = NO_CHANGE_PREFIX
+                            commit_msg = f"{NO_CHANGE_PREFIX} {patch_title}\n\nCherry-pick resulted in no changes - commit may no longer be applicable\nCherry-picked from: {patch_ref}"
+                            success_msg = f"{NO_CHANGE_PREFIX} commit created successfully"
 
+                        # Create empty commit
+                        try:
                             # Use original author and author date
                             author_name = original_commit.author.name
                             author_email = original_commit.author.email
                             author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
 
-                            repo.git.commit('--allow-empty', '-m', already_applied_msg,
+                            repo.git.commit('--allow-empty', '-m', commit_msg,
                                            f'--author={author_name} <{author_email}>',
                                            f'--date={author_date}')
-                            console.print(f"  [green]→[/green] {mapping.local_path}: Created [ALREADY APPLIED] commit for {patch_ref[:8]}")
+                            console.print(f"  [green]→[/green] {mapping.local_path}: Created {commit_prefix} commit for {patch_ref[:8]}")
+
+                            # Return success for both [ALREADY APPLIED] and [NO CHANGE] commits
+                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, success_msg, needs_push=True)
                         except git.exc.GitCommandError as commit_error:
-                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create [ALREADY APPLIED] commit: {str(commit_error)}")
+                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {commit_prefix} commit: {str(commit_error)}")
                     else:
                         # Re-raise the original error for normal handling
                         raise cherry_pick_error
@@ -551,7 +559,10 @@ class BulletinCherryPicker:
         for task in tasks:
             unique_repos.add(task.project_mapping.local_path)
 
-        console.print(f"[cyan]Recreating branch '{self.branch_name}' in {len(unique_repos)} repositories...[/cyan]")
+        if self.force_recreate:
+            console.print(f"[cyan]Recreating branch '{self.branch_name}' in {len(unique_repos)} repositories...[/cyan]")
+        else:
+            console.print(f"[cyan]Setting up branches in {len(unique_repos)} repositories...[/cyan]")
 
         for repo_path in unique_repos:
             try:
@@ -580,11 +591,28 @@ class BulletinCherryPicker:
 
                 checkout_ref = onto_ref if is_tag else self.onto
 
+                # Check current branch
+                current_branch = None
+                try:
+                    current_branch = repo.active_branch.name
+                except TypeError:
+                    pass
+
                 if existing_branch:
-                    # Branch exists, checkout and reset it
-                    repo.git.checkout(self.branch_name)
-                    repo.git.reset('--hard', checkout_ref)
-                    console.print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
+                    # Branch exists
+                    if self.force_recreate:
+                        # Force recreate: checkout and reset it
+                        if current_branch != self.branch_name:
+                            repo.git.checkout(self.branch_name)
+                        repo.git.reset('--hard', checkout_ref)
+                        console.print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
+                    else:
+                        # Just checkout existing branch if not already on it
+                        if current_branch != self.branch_name:
+                            repo.git.checkout(self.branch_name)
+                            console.print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
+                        else:
+                            console.print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
                 else:
                     # Branch doesn't exist, create and checkout it
                     repo.git.checkout('-b', self.branch_name, checkout_ref)
@@ -592,6 +620,64 @@ class BulletinCherryPicker:
 
             except Exception as e:
                 console.print(f"  [red]→[/red] Failed to recreate branch in {repo_path}: {str(e)}")
+
+    def update_security_patch_level(self, latest_bulletin_date: str):
+        """Update security patch level after successful cherry-picking."""
+        import os
+        from pathlib import Path
+
+        custom_product_dir = os.getenv('CUSTOM_PRODUCT_DIR')
+        if not custom_product_dir:
+            console.print("[yellow]CUSTOM_PRODUCT_DIR not set, skipping security patch level update[/yellow]")
+            return False
+
+        # Find the release codename directory in product/halogenOS/release/flag_values/
+        release_flag_values_dir = Path(custom_product_dir) / "release/flag_values"
+        if not release_flag_values_dir.exists():
+            console.print(f"[yellow]No release directory found at {release_flag_values_dir}, skipping security patch level update[/yellow]")
+            return False
+
+        # Find the release codename (should be only one directory)
+        release_codename = None
+        for item in release_flag_values_dir.iterdir():
+            if item.is_dir():
+                release_codename = item.name
+                break
+
+        if not release_codename:
+            console.print(f"[red]Could not find release codename directory in {release_flag_values_dir}[/red]")
+            return False
+
+        console.print(f"[cyan]Found release codename: {release_codename}[/cyan]")
+
+        # Path to the security patch file
+        security_patch_file = release_flag_values_dir / release_codename / "RELEASE_PLATFORM_SECURITY_PATCH.textproto"
+
+        # Content for the security patch file (following the format from build/release)
+        content = f'''name: "RELEASE_PLATFORM_SECURITY_PATCH"
+value {{
+  string_value: "{latest_bulletin_date}"
+}}
+'''
+
+        try:
+            if not self.dry_run:
+                # Create directory if it doesn't exist
+                security_patch_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # Write the security patch file
+                with open(security_patch_file, 'w') as f:
+                    f.write(content)
+
+                console.print(f"[green]Updated security patch level to {latest_bulletin_date} in {security_patch_file}[/green]")
+            else:
+                console.print(f"[blue]Would update security patch level to {latest_bulletin_date} in {security_patch_file}[/blue]")
+
+            return True
+
+        except Exception as e:
+            console.print(f"[red]Failed to update security patch level: {e}[/red]")
+            return False
 
     def run_repo_command(self, command: str) -> bool:
         """Run a repo command in the Android tree."""
@@ -905,6 +991,13 @@ class BulletinCherryPicker:
             console.print(f"\n[red]Failed pushes ({len(push_failures)}):[/red]")
             for project_path, error in push_failures:
                 console.print(f"  [red]- {project_path}:[/red] {error}")
+
+        # Update security patch level if all cherry-picks were successful
+        if successful_picks and not failed_picks:
+            # Find the latest bulletin date from the processed dates
+            latest_bulletin_date = max(self.bulletin_dates)
+            console.print(f"\n[cyan]Updating security patch level to {latest_bulletin_date}...[/cyan]")
+            self.update_security_patch_level(latest_bulletin_date)
 
         console.print("\n[bold green]Everything done.[/bold green]")
 

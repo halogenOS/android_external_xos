@@ -190,11 +190,11 @@ def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
                         base_url = repo_url.split('/commit/')[0]
                     else:
                         raise ValueError(f"Unknown URL format: {repo_url}")
-                    
+
                     # Add .git if not present
                     if not base_url.endswith('.git'):
                         base_url += '.git'
-                    
+
                     repo.git.fetch(base_url, commit_ref)
                     commit = repo.commit(commit_ref)
                     if progress and progress_task:
