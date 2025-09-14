@@ -90,6 +90,7 @@ class CherryPickResult:
     push_command: Optional[str] = None
     had_lfs: bool = False
     used_existing_branch: bool = False
+    verbose_only: bool = False
 
 
 def setup_progress_bar(total_tasks: int, dry_run: bool, console):
@@ -208,7 +209,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
     if cherry_picker and not dry_run:
         with cherry_picker.conflict_lock:
             if mapping.local_path in cherry_picker.conflicted_repos:
-                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "skipped due to previous conflict in this repository")
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "skipped due to previous conflict in this repository", verbose_only=True)
 
     if not project_path.exists():
         return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, "directory not found")
@@ -374,9 +375,9 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 until_ref = onto_ref if onto else None
                 existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9, until_ref=until_ref)
                 if existing_commit:
-                    console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit: {existing_commit[:8]} for {patch_ref[:8]}")
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit: {existing_commit[:8]} for {patch_ref[:8]}")
                 else:
-                    console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
 
                 # Try cherry-pick
                 try:
@@ -388,8 +389,8 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                     is_empty_cherrypick = ("nothing to commit" in error_msg.lower() or "no changes added to commit" in error_msg.lower() or "would result in an empty commit" in error_msg.lower() or "the previous cherry-pick is now empty" in error_msg.lower())
 
                     if is_empty_cherrypick:
-                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
-                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
+                        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
+                        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
 
                         # Check if we've already created an [ALREADY APPLIED] or [NO CHANGE] commit for this patch
                         original_commit = repo.commit(patch_ref)
@@ -414,7 +415,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                                     if commit_title == already_applied_title or commit_title == no_change_title:
                                         commit_already_exists = True
                                         prefix = ALREADY_APPLIED_PREFIX if commit_title == already_applied_title else NO_CHANGE_PREFIX
-                                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: {prefix} commit already exists for {patch_ref[:8]}")
+                                        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: {prefix} commit already exists for {patch_ref[:8]}")
                                         break
                             except git.exc.GitCommandError:
                                 pass
@@ -433,13 +434,13 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                         # Determine commit type and message based on evidence
                         if existing_commit:
                             # We found a similar commit via fuzzy matching - this is [ALREADY APPLIED]
-                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
+                            cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
                             commit_prefix = ALREADY_APPLIED_PREFIX
                             commit_msg = f"{ALREADY_APPLIED_PREFIX} {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
                             success_msg = f"{ALREADY_APPLIED_PREFIX} commit created successfully"
                         else:
                             # No similar commit found - this is [NO CHANGE] (empty cherry-pick with no evidence of existing commit)
-                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found - using {NO_CHANGE_PREFIX}")
+                            cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found - using {NO_CHANGE_PREFIX}")
                             commit_prefix = NO_CHANGE_PREFIX
                             commit_msg = f"{NO_CHANGE_PREFIX} {patch_title}\n\nCherry-pick resulted in no changes - commit may no longer be applicable\nCherry-picked from: {patch_ref}"
                             success_msg = f"{NO_CHANGE_PREFIX} commit created successfully"
@@ -454,7 +455,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                             repo.git.commit('--allow-empty', '-m', commit_msg,
                                            f'--author={author_name} <{author_email}>',
                                            f'--date={author_date}')
-                            console.print(f"  [green]→[/green] {mapping.local_path}: Created {commit_prefix} commit for {patch_ref[:8]}")
+                            cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {commit_prefix} commit for {patch_ref[:8]}")
 
                             # Return success for both [ALREADY APPLIED] and [NO CHANGE] commits
                             return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, success_msg, needs_push=True)
@@ -530,7 +531,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
 
 class BulletinCherryPicker:
-    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None, force_recreate: bool = False):
+    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None, force_recreate: bool = False, verbose: bool = False):
         self.bulletin_dates = bulletin_dates
         self.android_version = android_version
         self.dry_run = dry_run
@@ -539,9 +540,15 @@ class BulletinCherryPicker:
         self.onto = onto
         self.branch_name = branch_name
         self.force_recreate = force_recreate
+        self.verbose = verbose
         self.top = get_android_top()
         self.conflicted_repos = set()  # Track repos with conflicts
         self.conflict_lock = threading.Lock()  # Thread-safe access to conflicted_repos
+
+    def verbose_print(self, message):
+        """Print message only if verbose mode is enabled."""
+        if self.verbose:
+            console.print(message)
 
     def setup_branches(self, tasks: List[CherryPickTask], project_mappings: Dict[str, ProjectMapping]):
         """Setup branches in all repositories that will be cherry-picked to."""
@@ -605,21 +612,21 @@ class BulletinCherryPicker:
                         if current_branch != self.branch_name:
                             repo.git.checkout(self.branch_name)
                         repo.git.reset('--hard', checkout_ref)
-                        console.print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
+                        self.verbose_print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
                     else:
                         # Just checkout existing branch if not already on it
                         if current_branch != self.branch_name:
                             repo.git.checkout(self.branch_name)
-                            console.print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
+                            self.verbose_print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
                         else:
-                            console.print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
+                            self.verbose_print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
                 else:
                     # Branch doesn't exist, create and checkout it
                     repo.git.checkout('-b', self.branch_name, checkout_ref)
-                    console.print(f"  [yellow]→[/yellow] Created {repo_path}:{self.branch_name} from {checkout_ref}")
+                    self.verbose_print(f"  [yellow]→[/yellow] Created {repo_path}:{self.branch_name} from {checkout_ref}")
 
             except Exception as e:
-                console.print(f"  [red]→[/red] Failed to recreate branch in {repo_path}: {str(e)}")
+                self.verbose_print(f"  [red]→[/red] Failed to recreate branch in {repo_path}: {str(e)}")
 
     def update_security_patch_level(self, latest_bulletin_date: str):
         """Update security patch level after successful cherry-picking."""
@@ -806,7 +813,7 @@ value {{
             return [], []
 
         dry_run_prefix = "[DRY RUN] " if self.dry_run else ""
-        console.print(f"\n[bold]{dry_run_prefix}Processing {len(tasks)} cherry-pick operations...[/bold]")
+        self.verbose_print(f"\n[bold]{dry_run_prefix}Processing {len(tasks)} cherry-pick operations...[/bold]")
 
         successful_picks = []
         failed_picks = []
@@ -923,16 +930,16 @@ value {{
 
         # Generate manifest and parse projects
         try:
-            console.print("[cyan]Generating temporary manifest file...[/cyan]")
+            self.verbose_print("[cyan]Generating temporary manifest file...[/cyan]")
             manifest_path = self.generate_manifest()
 
-            console.print("[cyan]Building project mappings from manifest...[/cyan]")
+            self.verbose_print("[cyan]Building project mappings from manifest...[/cyan]")
             project_mappings = build_project_mappings(manifest_path)
-            console.print(f"[green]Built {len(project_mappings)} project mappings[/green]")
+            self.verbose_print(f"[green]Built {len(project_mappings)} project mappings[/green]")
 
-            console.print("[cyan]Creating cherry-pick tasks...[/cyan]")
+            self.verbose_print("[cyan]Creating cherry-pick tasks...[/cyan]")
             tasks = self.create_cherry_pick_tasks(bulletin_data, patches, project_mappings)
-            console.print(f"[green]Created {len(tasks)} cherry-pick tasks[/green]")
+            self.verbose_print(f"[green]Created {len(tasks)} cherry-pick tasks[/green]")
 
             # Setup branches if using --onto (before any cherry-picking begins)
             if self.onto and self.branch_name:
@@ -959,17 +966,13 @@ value {{
         # Display results
         self.display_cherry_pick_results(successful_picks, failed_picks)
 
-        # Execute pushes for successful cherry-picks (deferred pushing)
+        # Execute pushes for successful cherry-picks (only when explicitly requested)
         push_successes = 0
         push_failures = []
 
-        # Block pushing if any cherry-pick failed (unless in push-only mode)
-        if successful_picks and not self.dry_run:
-            if failed_picks and not self.push_only:
-                console.print(f"\n[yellow]⚠️  Skipping push because {len(failed_picks)} cherry-picks failed.[/yellow]")
-                console.print("[yellow]Use --push-only flag to push successful cherry-picks after fixing failures.[/yellow]")
-            else:
-                push_successes, push_failures = self.execute_pushes(successful_picks)
+        # Only push when --push-only is specified
+        if successful_picks and not self.dry_run and self.push_only:
+            push_successes, push_failures = self.execute_pushes(successful_picks)
 
         # Clean up temporary manifest
         cleanup_manifest(manifest_path, self.dry_run)
@@ -985,7 +988,9 @@ value {{
         if failed_picks:
             console.print(f"\n[red]Failed cherry-picks ({len(failed_picks)}):[/red]")
             for result in failed_picks:
-                console.print(f"  [red]- {result.project_path} ({result.patch_ref[:12]}):[/red] {result.message}")
+                # Show message if it's not verbose-only, or if we're in verbose mode
+                if not result.verbose_only or self.verbose:
+                    console.print(f"  [red]- {result.project_path} ({result.patch_ref[:12]}):[/red] {result.message}")
 
         if push_failures:
             console.print(f"\n[red]Failed pushes ({len(push_failures)}):[/red]")
@@ -1038,6 +1043,12 @@ Examples:
     )
 
     parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Show verbose output including detailed progress information"
+    )
+
+    parser.add_argument(
         "--workers",
         type=int,
         default=4,
@@ -1079,7 +1090,8 @@ Examples:
             push_only=args.push_only,
             onto=args.onto,
             branch_name=args.branch_name,
-            force_recreate=args.force_recreate
+            force_recreate=args.force_recreate,
+            verbose=args.verbose
         )
 
         return picker.run()
