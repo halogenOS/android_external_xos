@@ -197,6 +197,78 @@
           meta.mainProgram = pname;
         };
 
+        # GitLab branch setter script as a Python application
+        gitlab-branch-setter = python3Packages.buildPythonApplication rec {
+          pname = "gitlab-branch-setter";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            packaging
+            tqdm
+            python-gitlab
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp set_default_branches.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
+        # GitHub branch setter script as a Python application
+        github-branch-setter = python3Packages.buildPythonApplication rec {
+          pname = "github-branch-setter";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            packaging
+            tqdm
+            pygithub
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp set_default_branches_github.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
+
+        # GitLab webhook manager script as a Python application
+        gitlab-webhook-manager = python3Packages.buildPythonApplication rec {
+          pname = "gitlab-webhook-manager";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = with python3Packages; [
+            python-gitlab
+            tqdm
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp manage_webhooks.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Development shell
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -234,6 +306,9 @@
             echo "  python reticulate_splines.py - Reticulate splines (create branches from upstream)"
             echo "  python fetch_bulletin.py    - Fetch Android security bulletins as JSON"
             echo "  python cherry_pick_bulletin.py - Cherry-pick security patches from bulletins"
+            echo "  python set_default_branches.py - Set default branches for GitLab repositories"
+            echo "  python set_default_branches_github.py - Set default branches for GitHub repositories"
+            echo "  python manage_webhooks.py   - Manage GitLab webhooks for repositories"
             echo ""
             echo "Make sure TOP is set and build/envsetup.sh is sourced"
           '';
@@ -250,6 +325,9 @@
           fetch-bulletin = fetch-bulletin;
           cherry-pick-bulletin = cherry-pick-bulletin;
           xos-common = xos-common;
+          gitlab-branch-setter = gitlab-branch-setter;
+          github-branch-setter = github-branch-setter;
+          gitlab-webhook-manager = gitlab-webhook-manager;
         };
 
         apps = {
@@ -280,6 +358,18 @@
           cherry-pick-bulletin = {
             type = "app";
             program = lib.getExe cherry-pick-bulletin;
+          };
+          gitlab-branch-setter = {
+            type = "app";
+            program = lib.getExe gitlab-branch-setter;
+          };
+          github-branch-setter = {
+            type = "app";
+            program = lib.getExe github-branch-setter;
+          };
+          gitlab-webhook-manager = {
+            type = "app";
+            program = lib.getExe gitlab-webhook-manager;
           };
         };
 

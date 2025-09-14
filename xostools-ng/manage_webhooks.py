@@ -14,10 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from dataclasses import dataclass
 from typing import Optional, List, Tuple
+from xos_common import get_gitlab_token, console, GITLAB_URL, GITLAB_GROUP_ID
 
 # Configuration
-GITLAB_URL = "https://git.halogenos.org"
-GROUP_ID = 108
 MAX_WORKERS = 10  # Number of concurrent threads
 
 # Thread-safe counters
@@ -38,18 +37,6 @@ class ProcessResult:
     webhooks_removed: int = 0
     webhook_added: bool = False
 
-def get_gitlab_token():
-    """Read GitLab token from file."""
-    token_path = Path.home() / ".creds" / "xos_gitlab_token"
-    try:
-        with open(token_path, 'r') as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        print(f"Error: Token file not found at {token_path}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error reading token: {e}")
-        sys.exit(1)
 
 def is_push_webhook(webhook_url: str) -> bool:
     """Check if a webhook URL ends with /push."""
@@ -202,32 +189,36 @@ def main():
     
     # Initialize GitLab connection
     token = get_gitlab_token()
+    if not token:
+        console.print("[red]Error: GitLab token not found. Make sure ~/.creds/xos_gitlab_token exists.[/red]")
+        sys.exit(1)
+    
     gl = gitlab.Gitlab(GITLAB_URL, private_token=token)
     
     try:
         gl.auth()
     except gitlab.exceptions.GitlabAuthenticationError:
-        print("Error: Failed to authenticate with GitLab. Check your token.")
+        console.print("[red]Error: Failed to authenticate with GitLab. Check your token.[/red]")
         sys.exit(1)
     
-    print(f"Connected to GitLab at {GITLAB_URL}")
+    console.print(f"Connected to GitLab at {GITLAB_URL}")
     
     # Get the group
     try:
-        group = gl.groups.get(GROUP_ID)
+        group = gl.groups.get(GITLAB_GROUP_ID)
     except gitlab.exceptions.GitlabGetError:
-        print(f"Error: Could not find group with ID {GROUP_ID}")
+        console.print(f"[red]Error: Could not find group with ID {GITLAB_GROUP_ID}[/red]")
         sys.exit(1)
     
-    print(f"Processing repositories in group: {group.name} (ID: {GROUP_ID})")
-    print(f"Target webhook URL: {args.webhook_url}")
+    console.print(f"Processing repositories in group: {group.name} (ID: {GITLAB_GROUP_ID})")
+    console.print(f"Target webhook URL: {args.webhook_url}")
     if args.dry_run:
-        print("DRY RUN MODE - No changes will be made")
-    print(f"Using {MAX_WORKERS} concurrent workers")
-    print()
+        console.print("[blue]DRY RUN MODE - No changes will be made[/blue]")
+    console.print(f"Using {MAX_WORKERS} concurrent workers")
+    console.print()
     
     # First, collect all projects
-    print("Fetching project list...")
+    console.print("Fetching project list...")
     projects = list(tqdm(
         group.projects.list(include_subgroups=False, iterator=True),
         desc="Discovering projects",
@@ -235,16 +226,16 @@ def main():
     ))
     
     total_projects = len(projects)
-    print(f"\nFound {total_projects} projects to process")
-    print()
+    console.print(f"\nFound {total_projects} projects to process")
+    console.print()
     
     if args.dry_run:
-        print("Would process the following projects:")
+        console.print("Would process the following projects:")
         for project in projects[:10]:  # Show first 10 as example
-            print(f"  - {project.path_with_namespace}")
+            console.print(f"  - {project.path_with_namespace}")
         if len(projects) > 10:
-            print(f"  ... and {len(projects) - 10} more")
-        print("\nExiting dry run mode.")
+            console.print(f"  ... and {len(projects) - 10} more")
+        console.print("\nExiting dry run mode.")
         return
     
     # Results storage

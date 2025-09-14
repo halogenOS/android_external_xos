@@ -18,6 +18,11 @@ import re
 from rapidfuzz import fuzz
 from datetime import datetime, timedelta
 
+# Configuration constants (configurable through environment variables)
+GITLAB_URL = os.environ.get('XOS_GITLAB_URL', 'https://git.halogenos.org')
+GITLAB_GROUP_ID = int(os.environ.get('XOS_GITLAB_GROUP_ID', '108'))  # halogenOS group ID
+GITHUB_ORG = os.environ.get('XOS_GITHUB_ORG', 'halogenOS')
+
 @dataclass
 class GitRemote:
     name: str
@@ -407,15 +412,11 @@ def create_xos_repo(repo_name: str) -> bool:
             console.print("[yellow]Warning: No GitLab token found, cannot create repository[/yellow]")
             return False
 
-        # GitLab configuration (configurable through environment variables)
-        GITLAB_URL = os.environ.get('XOS_GITLAB_URL', 'https://git.halogenos.org')
-        GROUP_ID = int(os.environ.get('XOS_GITLAB_GROUP_ID', '108'))  # halogenOS group ID
-
         gl = gitlab.Gitlab(GITLAB_URL, private_token=gitlab_token)
         gl.auth()
 
         # Check if repository already exists
-        group = gl.groups.get(GROUP_ID)
+        group = gl.groups.get(GITLAB_GROUP_ID)
         try:
             existing_project = group.projects.get(repo_name)
             console.print(f"[blue]Repository {repo_name} already exists[/blue]")
@@ -426,7 +427,7 @@ def create_xos_repo(repo_name: str) -> bool:
         # Create the repository
         project_data = {
             'name': repo_name,
-            'namespace_id': GROUP_ID,
+            'namespace_id': GITLAB_GROUP_ID,
             'visibility': 'public'
         }
 

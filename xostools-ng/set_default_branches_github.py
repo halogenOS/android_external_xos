@@ -13,9 +13,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from dataclasses import dataclass
 from typing import Optional, List
+from xos_common import get_github_token, console, GITHUB_ORG
 
 # Configuration
-GITHUB_ORG = "halogenOS"
 MAX_WORKERS = 10  # Number of concurrent threads
 
 # Thread-safe counters
@@ -34,18 +34,6 @@ class ProcessResult:
     old_branch: Optional[str] = None
     new_branch: Optional[str] = None
 
-def get_github_token():
-    """Read GitHub token from file."""
-    token_path = Path.home() / ".creds" / "xos_github_token"
-    try:
-        with open(token_path, 'r') as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        print(f"Error: Token file not found at {token_path}")
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error reading token: {e}")
-        sys.exit(1)
 
 def parse_xos_version(branch_name):
     """Parse XOS version from branch name for sorting."""
@@ -166,29 +154,33 @@ def main():
     """Main function to process all repositories."""
     # Initialize GitHub connection
     token = get_github_token()
+    if not token:
+        console.print("[red]Error: GitHub token not found. Make sure ~/.creds/xos_github_token exists.[/red]")
+        sys.exit(1)
+    
     g = Github(token)
     
     try:
         # Test authentication by getting the authenticated user
         user = g.get_user()
-        print(f"Authenticated as: {user.login}")
+        console.print(f"Authenticated as: {user.login}")
     except Exception as e:
-        print(f"Error: Failed to authenticate with GitHub. Check your token. {e}")
+        console.print(f"[red]Error: Failed to authenticate with GitHub. Check your token. {e}[/red]")
         sys.exit(1)
     
     # Get the organization
     try:
         org = g.get_organization(GITHUB_ORG)
-        print(f"Processing repositories in organization: {org.name} (@{org.login})")
+        console.print(f"Processing repositories in organization: {org.name} (@{org.login})")
     except Exception as e:
-        print(f"Error: Could not find organization '{GITHUB_ORG}': {e}")
+        console.print(f"[red]Error: Could not find organization '{GITHUB_ORG}': {e}[/red]")
         sys.exit(1)
     
-    print(f"Using {MAX_WORKERS} concurrent workers")
-    print()
+    console.print(f"Using {MAX_WORKERS} concurrent workers")
+    console.print()
     
     # Get all repositories (handle pagination automatically)
-    print("Fetching repository list...")
+    console.print("Fetching repository list...")
     repos = list(tqdm(
         org.get_repos(type='all'),
         desc="Discovering repositories",
@@ -200,10 +192,10 @@ def main():
     archived_count = len(repos) - len(active_repos)
     
     total_repos = len(active_repos)
-    print(f"\nFound {total_repos} active repositories to process")
+    console.print(f"\nFound {total_repos} active repositories to process")
     if archived_count > 0:
-        print(f"(Skipping {archived_count} archived repositories)")
-    print()
+        console.print(f"(Skipping {archived_count} archived repositories)")
+    console.print()
     
     # Results storage
     results: List[ProcessResult] = []
