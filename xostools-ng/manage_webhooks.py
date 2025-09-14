@@ -42,21 +42,21 @@ def is_push_webhook(webhook_url: str) -> bool:
     """Check if a webhook URL ends with /push."""
     return webhook_url.rstrip('/').endswith('/push')
 
-def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: str, 
+def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: str,
                            target_url: str, pbar: tqdm) -> ProcessResult:
     """Process webhooks for a single project."""
     try:
         # Get full project details
         project = gl.projects.get(project_id)
-        
+
         # Get all webhooks for this project
         webhooks = list(project.hooks.list(iterator=True))
-        
+
         # Track actions taken
         webhooks_removed = 0
         webhook_exists = False
         webhook_added = False
-        
+
         # Check existing webhooks
         for webhook in webhooks:
             if is_push_webhook(webhook.url):
@@ -78,7 +78,7 @@ def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: s
                             status='error',
                             message=f'Failed to remove webhook: {e}'
                         )
-        
+
         # Add webhook if needed
         if not webhook_exists:
             try:
@@ -111,7 +111,7 @@ def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: s
                     message=f'Failed to add webhook: {e}',
                     webhooks_removed=webhooks_removed
                 )
-        
+
         # Update statistics and determine status
         if webhook_added:
             with counter_lock:
@@ -130,7 +130,7 @@ def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: s
                 stats['skipped'] += 1
             status = 'skipped'
             message = 'Webhook already configured correctly'
-        
+
         pbar.update(1)
         return ProcessResult(
             project_id=project_id,
@@ -140,7 +140,7 @@ def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: s
             webhooks_removed=webhooks_removed,
             webhook_added=webhook_added
         )
-        
+
     except Exception as e:
         pbar.update(1)
         with counter_lock:
@@ -175,48 +175,48 @@ def main():
         action='store_true',
         help='Show what would be done without making changes'
     )
-    
+
     args = parser.parse_args()
-    
+
     # Validate webhook URL
     if not args.webhook_url.rstrip('/').endswith('/push'):
         print("Error: Webhook URL must end with '/push'")
         sys.exit(1)
-    
+
     if not validate_url(args.webhook_url):
         print("Error: Invalid URL format")
         sys.exit(1)
-    
+
     # Initialize GitLab connection
     token = get_gitlab_token()
     if not token:
         console.print("[red]Error: GitLab token not found. Make sure ~/.creds/xos_gitlab_token exists.[/red]")
         sys.exit(1)
-    
+
     gl = gitlab.Gitlab(GITLAB_URL, private_token=token)
-    
+
     try:
         gl.auth()
     except gitlab.exceptions.GitlabAuthenticationError:
         console.print("[red]Error: Failed to authenticate with GitLab. Check your token.[/red]")
         sys.exit(1)
-    
+
     console.print(f"Connected to GitLab at {GITLAB_URL}")
-    
+
     # Get the group
     try:
         group = gl.groups.get(GITLAB_GROUP_ID)
     except gitlab.exceptions.GitlabGetError:
         console.print(f"[red]Error: Could not find group with ID {GITLAB_GROUP_ID}[/red]")
         sys.exit(1)
-    
+
     console.print(f"Processing repositories in group: {group.name} (ID: {GITLAB_GROUP_ID})")
     console.print(f"Target webhook URL: {args.webhook_url}")
     if args.dry_run:
         console.print("[blue]DRY RUN MODE - No changes will be made[/blue]")
     console.print(f"Using {MAX_WORKERS} concurrent workers")
     console.print()
-    
+
     # First, collect all projects
     console.print("Fetching project list...")
     projects = list(tqdm(
@@ -224,11 +224,11 @@ def main():
         desc="Discovering projects",
         unit="projects"
     ))
-    
+
     total_projects = len(projects)
     console.print(f"\nFound {total_projects} projects to process")
     console.print()
-    
+
     if args.dry_run:
         console.print("Would process the following projects:")
         for project in projects[:10]:  # Show first 10 as example
@@ -237,31 +237,31 @@ def main():
             console.print(f"  ... and {len(projects) - 10} more")
         console.print("\nExiting dry run mode.")
         return
-    
+
     # Results storage
     results: List[ProcessResult] = []
-    
+
     # Process projects with thread pool
     with tqdm(total=total_projects, desc="Processing webhooks", unit="projects") as pbar:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Submit all tasks
             future_to_project = {
                 executor.submit(
-                    process_project_webhooks, 
-                    gl, 
-                    project.id, 
+                    process_project_webhooks,
+                    gl,
+                    project.id,
                     project.path_with_namespace,
                     args.webhook_url,
                     pbar
-                ): project 
+                ): project
                 for project in projects
             }
-            
+
             # Collect results as they complete
             for future in as_completed(future_to_project):
                 result = future.result()
                 results.append(result)
-    
+
     # Display summary
     print(f"\n{'='*60}")
     print("SUMMARY")
@@ -271,7 +271,7 @@ def main():
     print(f"  ✓ Webhooks removed: {stats['removed']}")
     print(f"  - Skipped (already configured): {stats['skipped']}")
     print(f"  ✗ Errors: {stats['errors']}")
-    
+
     # Show projects where webhooks were added
     added_results = [r for r in results if r.webhook_added]
     if added_results:
@@ -282,7 +282,7 @@ def main():
             print(f"  {result.project_name}")
             if result.webhooks_removed > 0:
                 print(f"    (also removed {result.webhooks_removed} incorrect webhook(s))")
-    
+
     # Show projects where only webhooks were removed
     removed_only = [r for r in results if r.status == 'removed']
     if removed_only:
@@ -291,7 +291,7 @@ def main():
         print(f"{'='*60}")
         for result in sorted(removed_only, key=lambda x: x.project_name):
             print(f"  {result.project_name}: removed {result.webhooks_removed} webhook(s)")
-    
+
     # Show errors if any
     error_results = [r for r in results if r.status == 'error']
     if error_results:

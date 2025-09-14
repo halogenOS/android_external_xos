@@ -41,10 +41,10 @@ def parse_xos_version(branch_name):
     """Parse XOS version from branch name for sorting."""
     if not branch_name.startswith("XOS-"):
         return None
-    
+
     # Extract version part (e.g., "16.0" from "XOS-16.0")
     version_str = branch_name[4:]  # Remove "XOS-" prefix
-    
+
     try:
         # Use packaging.version for proper version comparison
         return version.parse(version_str)
@@ -54,18 +54,18 @@ def parse_xos_version(branch_name):
 def select_latest_xos_branch(branches):
     """Select the latest XOS branch from a list of branch names."""
     xos_branches = []
-    
+
     for branch in branches:
         parsed_version = parse_xos_version(branch.name)
         if parsed_version is not None:
             xos_branches.append((branch.name, parsed_version))
-    
+
     if not xos_branches:
         return None
-    
+
     # Sort by version in descending order (latest first)
     xos_branches.sort(key=lambda x: x[1], reverse=True)
-    
+
     return xos_branches[0][0]  # Return the branch name
 
 def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar: tqdm) -> ProcessResult:
@@ -74,10 +74,10 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
         # Get full project details
         full_project = gl.projects.get(project_id)
         current_default = full_project.default_branch
-        
+
         # Get all branches for this project
         branches = list(full_project.branches.list(iterator=True))
-        
+
         if not branches:
             with counter_lock:
                 stats['skipped'] += 1
@@ -88,10 +88,10 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
                 status='skipped',
                 message='No branches found'
             )
-        
+
         # Select the latest XOS branch
         selected_branch = select_latest_xos_branch(branches)
-        
+
         if not selected_branch:
             with counter_lock:
                 stats['skipped'] += 1
@@ -102,7 +102,7 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
                 status='skipped',
                 message='No XOS branches found'
             )
-        
+
         # Check if we need to update
         if current_default == selected_branch:
             with counter_lock:
@@ -116,15 +116,15 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
                 old_branch=current_default,
                 new_branch=selected_branch
             )
-        
+
         # Update the default branch
         full_project.default_branch = selected_branch
         full_project.save()
-        
+
         with counter_lock:
             stats['updated'] += 1
         pbar.update(1)
-        
+
         return ProcessResult(
             project_id=project_id,
             project_name=project_name,
@@ -133,7 +133,7 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
             old_branch=current_default,
             new_branch=selected_branch
         )
-        
+
     except Exception as e:
         with counter_lock:
             stats['errors'] += 1
@@ -152,28 +152,28 @@ def main():
     if not token:
         console.print("[red]Error: GitLab token not found. Make sure ~/.creds/xos_gitlab_token exists.[/red]")
         sys.exit(1)
-    
+
     gl = gitlab.Gitlab(GITLAB_URL, private_token=token)
-    
+
     try:
         gl.auth()
     except gitlab.exceptions.GitlabAuthenticationError:
         console.print("[red]Error: Failed to authenticate with GitLab. Check your token.[/red]")
         sys.exit(1)
-    
+
     console.print(f"Connected to GitLab at {GITLAB_URL}")
-    
+
     # Get the group
     try:
         group = gl.groups.get(GITLAB_GROUP_ID)
     except gitlab.exceptions.GitlabGetError:
         console.print(f"[red]Error: Could not find group with ID {GITLAB_GROUP_ID}[/red]")
         sys.exit(1)
-    
+
     console.print(f"Processing repositories in group: {group.name} (ID: {GITLAB_GROUP_ID})")
     console.print(f"Using {MAX_WORKERS} concurrent workers")
     console.print()
-    
+
     # First, collect all projects (we need the total count for the progress bar)
     console.print("Fetching project list...")
     projects = list(tqdm(
@@ -181,34 +181,34 @@ def main():
         desc="Discovering projects",
         unit="projects"
     ))
-    
+
     total_projects = len(projects)
     console.print(f"\nFound {total_projects} projects to process")
     console.print()
-    
+
     # Results storage
     results: List[ProcessResult] = []
-    
+
     # Process projects with thread pool
     with tqdm(total=total_projects, desc="Processing projects", unit="projects") as pbar:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             # Submit all tasks
             future_to_project = {
                 executor.submit(
-                    process_project, 
-                    gl, 
-                    project.id, 
+                    process_project,
+                    gl,
+                    project.id,
                     project.path_with_namespace,
                     pbar
-                ): project 
+                ): project
                 for project in projects
             }
-            
+
             # Collect results as they complete
             for future in as_completed(future_to_project):
                 result = future.result()
                 results.append(result)
-    
+
     # Display summary
     print(f"\n{'='*60}")
     print("SUMMARY")
@@ -217,7 +217,7 @@ def main():
     print(f"  ✓ Updated: {stats['updated']}")
     print(f"  - Skipped: {stats['skipped']}")
     print(f"  ✗ Errors: {stats['errors']}")
-    
+
     # Show updated projects
     if stats['updated'] > 0:
         print(f"\n{'='*60}")
@@ -226,7 +226,7 @@ def main():
         for result in results:
             if result.status == 'updated':
                 print(f"  {result.project_name}: {result.old_branch} → {result.new_branch}")
-    
+
     # Show errors if any
     if stats['errors'] > 0:
         print(f"\n{'='*60}")
