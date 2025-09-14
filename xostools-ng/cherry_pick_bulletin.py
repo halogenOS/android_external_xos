@@ -315,45 +315,12 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 except TypeError:
                     current_branch = None
 
+                # Branch setup is handled upfront, just ensure we're on the right branch
                 if current_branch != target_branch_name:
                     try:
-                        # Check if target branch already exists
-                        existing_branch = None
-                        for branch in repo.heads:
-                            if branch.name == target_branch_name:
-                                existing_branch = branch
-                                break
-
-                        if existing_branch:
-                            # Branch exists, just checkout (no reset)
-                            repo.git.checkout(target_branch_name)
-                            used_existing_branch = True
-                        else:
-                            # Create new branch based on the onto ref
-                            try:
-                                # Check if the ref is a tag (tags don't use remote prefix)
-                                is_tag = False
-                                try:
-                                    # Try to show the tag - if it exists, it's a tag
-                                    repo.git.show_ref('--tags', f'refs/tags/{onto_ref}')
-                                    is_tag = True
-                                except git.exc.GitCommandError:
-                                    # Not a tag, might be a branch
-                                    pass
-
-                                if is_tag:
-                                    # For tags, use the tag name directly
-                                    checkout_ref = onto_ref
-                                else:
-                                    # For branches, use remote prefix if specified
-                                    checkout_ref = f"{onto_remote}/{onto_ref}" if onto_remote else onto
-
-                                repo.git.checkout('-b', target_branch_name, checkout_ref)
-                            except git.exc.GitCommandError as e:
-                                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create branch {target_branch_name} from {checkout_ref}: {str(e)}")
-
+                        repo.git.checkout(target_branch_name)
                     except git.exc.GitCommandError as e:
-                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout/create branch {target_branch_name}: {str(e)}")
+                        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout branch {target_branch_name}: {str(e)}")
             else:
                 # Original logic - use mapping.revision
                 try:
@@ -404,16 +371,13 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                     pass
 
                 # Use fuzzy matching to find similar commits (>90% similarity)
-                existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9)
+                # When using --onto, only search in the upstream ref to avoid finding our own recent commits
+                until_ref = onto_ref if onto else None
+                existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9, until_ref=until_ref)
                 if existing_commit:
                     console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit: {existing_commit[:8]} for {patch_ref[:8]}")
                 else:
                     console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
-
-                    # Try with lower threshold for debugging
-                    debug_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.8)
-                    if debug_commit:
-                        console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Would match with 80% threshold: {debug_commit[:8]}")
 
                 # Try cherry-pick
                 try:
@@ -428,20 +392,40 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                         console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
                         console.print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
 
+                        # Check if we've already created an [ALREADY APPLIED] commit for this patch
+                        original_commit = repo.commit(patch_ref)
+                        patch_title = original_commit.message.split('\n')[0].strip()
+                        already_applied_title = f"[ALREADY APPLIED] {patch_title}"
+
+                        already_applied_exists = False
+                        if onto:
+                            # Parse onto to get the ref
+                            if '/' in onto:
+                                onto_remote, onto_ref = onto.split('/', 1)
+                            else:
+                                onto_ref = onto
+
+                            # Check if the [ALREADY APPLIED] title already exists in the range
+                            try:
+                                log_output = repo.git.log(f"{onto_ref}..HEAD", "--oneline", f"--grep={already_applied_title}")
+                                if log_output.strip():
+                                    already_applied_exists = True
+                                    console.print(f"  [yellow]→[/yellow] {mapping.local_path}: [ALREADY APPLIED] commit already exists for {patch_ref[:8]}")
+                            except git.exc.GitCommandError:
+                                pass
+
+                        if already_applied_exists:
+                            # Skip creating another [ALREADY APPLIED] commit
+                            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "[ALREADY APPLIED] commit already exists (skipped)", needs_push=False)
+
                         # If we found a similar commit via fuzzy matching, use it
                         if existing_commit:
                             console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
                             reference_commit = existing_commit
                         else:
-                            # Try to find ANY commit that might be related by searching for similar changes
-                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Searching for any similar commit with lower threshold...")
-                            reference_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.7)
-                            if reference_commit:
-                                console.print(f"  [yellow]→[/yellow] {mapping.local_path}: Found with 70% threshold: {reference_commit[:8]}")
-                            else:
-                                console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found even with 70% threshold")
-                                # Use a generic reference for the empty case
-                                reference_commit = "unknown"
+                            # No similar commit found, use generic reference
+                            console.print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found")
+                            reference_commit = "unknown"
 
                         # Abort the cherry-pick and clean up
                         try:
@@ -452,14 +436,19 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
                         # Create empty commit with [ALREADY APPLIED] prefix
                         try:
-                            # Get the original commit message for the [ALREADY APPLIED] commit
-                            original_commit = repo.commit(patch_ref)
-                            patch_title = original_commit.message.split('\n')[0].strip()
                             if reference_commit != "unknown":
                                 already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit was already applied in {reference_commit}\nCherry-picked from: {patch_ref}"
                             else:
                                 already_applied_msg = f"[ALREADY APPLIED] {patch_title}\n\nOriginal commit changes appear to already be present\nCherry-picked from: {patch_ref}"
-                            repo.git.commit('--allow-empty', '-m', already_applied_msg)
+
+                            # Use original author and author date
+                            author_name = original_commit.author.name
+                            author_email = original_commit.author.email
+                            author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
+
+                            repo.git.commit('--allow-empty', '-m', already_applied_msg,
+                                           f'--author={author_name} <{author_email}>',
+                                           f'--date={author_date}')
                             console.print(f"  [green]→[/green] {mapping.local_path}: Created [ALREADY APPLIED] commit for {patch_ref[:8]}")
                         except git.exc.GitCommandError as commit_error:
                             return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create [ALREADY APPLIED] commit: {str(commit_error)}")
@@ -533,7 +522,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
 
 class BulletinCherryPicker:
-    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None):
+    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None, force_recreate: bool = False):
         self.bulletin_dates = bulletin_dates
         self.android_version = android_version
         self.dry_run = dry_run
@@ -541,9 +530,68 @@ class BulletinCherryPicker:
         self.push_only = push_only
         self.onto = onto
         self.branch_name = branch_name
+        self.force_recreate = force_recreate
         self.top = get_android_top()
         self.conflicted_repos = set()  # Track repos with conflicts
         self.conflict_lock = threading.Lock()  # Thread-safe access to conflicted_repos
+
+    def setup_branches(self, tasks: List[CherryPickTask], project_mappings: Dict[str, ProjectMapping]):
+        """Setup branches in all repositories that will be cherry-picked to."""
+        if not self.onto or not self.branch_name:
+            return
+
+        # Parse the onto parameter
+        if '/' in self.onto:
+            onto_remote, onto_ref = self.onto.split('/', 1)
+        else:
+            return  # Invalid onto format
+
+        # Get unique repositories from tasks
+        unique_repos = set()
+        for task in tasks:
+            unique_repos.add(task.project_mapping.local_path)
+
+        console.print(f"[cyan]Recreating branch '{self.branch_name}' in {len(unique_repos)} repositories...[/cyan]")
+
+        for repo_path in unique_repos:
+            try:
+                import git
+                from pathlib import Path
+                project_path = Path(self.top) / repo_path
+                if not project_path.exists():
+                    continue
+
+                repo = git.Repo(project_path)
+
+                # Check if the branch exists
+                existing_branch = None
+                for branch in repo.branches:
+                    if branch.name == self.branch_name:
+                        existing_branch = branch
+                        break
+
+                # Check if the ref is a tag (tags don't use remote prefix)
+                is_tag = False
+                try:
+                    repo.git.show_ref('--tags', f'refs/tags/{onto_ref}')
+                    is_tag = True
+                except git.exc.GitCommandError:
+                    pass
+
+                checkout_ref = onto_ref if is_tag else self.onto
+
+                if existing_branch:
+                    # Branch exists, checkout and reset it
+                    repo.git.checkout(self.branch_name)
+                    repo.git.reset('--hard', checkout_ref)
+                    console.print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
+                else:
+                    # Branch doesn't exist, create and checkout it
+                    repo.git.checkout('-b', self.branch_name, checkout_ref)
+                    console.print(f"  [yellow]→[/yellow] Created {repo_path}:{self.branch_name} from {checkout_ref}")
+
+            except Exception as e:
+                console.print(f"  [red]→[/red] Failed to recreate branch in {repo_path}: {str(e)}")
 
     def run_repo_command(self, command: str) -> bool:
         """Run a repo command in the Android tree."""
@@ -800,6 +848,14 @@ class BulletinCherryPicker:
             tasks = self.create_cherry_pick_tasks(bulletin_data, patches, project_mappings)
             console.print(f"[green]Created {len(tasks)} cherry-pick tasks[/green]")
 
+            # Setup branches if using --onto (before any cherry-picking begins)
+            if self.onto and self.branch_name:
+                if self.force_recreate:
+                    console.print(f"[cyan]Force recreating branches in all repositories...[/cyan]")
+                else:
+                    console.print(f"[cyan]Setting up branches in all repositories...[/cyan]")
+                self.setup_branches(tasks, project_mappings)
+
         except Exception as e:
             console.print(f"[red]Failed to prepare cherry-pick tasks: {e}[/red]")
             return 1
@@ -913,6 +969,12 @@ Examples:
         help="Custom branch name to use instead of auto-generated ASB branch name"
     )
 
+    parser.add_argument(
+        "--force-recreate",
+        action="store_true",
+        help="Force recreate the branch specified by --branch-name even if it already exists"
+    )
+
     args = parser.parse_args()
 
     try:
@@ -923,7 +985,8 @@ Examples:
             max_workers=args.workers,
             push_only=args.push_only,
             onto=args.onto,
-            branch_name=args.branch_name
+            branch_name=args.branch_name,
+            force_recreate=args.force_recreate
         )
 
         return picker.run()

@@ -759,7 +759,7 @@ def filter_patches_by_android_version(bulletin_data: List[Dict], android_version
     return filtered_patches
 
 
-def find_similar_commit_by_message(repo: git.Repo, target_commit_ref: str, similarity_threshold: float = 0.9) -> Optional[str]:
+def find_similar_commit_by_message(repo: git.Repo, target_commit_ref: str, similarity_threshold: float = 0.9, until_ref: Optional[str] = None) -> Optional[str]:
     """
     Find commits with similar messages using fuzzy matching and date-based optimization.
 
@@ -767,6 +767,7 @@ def find_similar_commit_by_message(repo: git.Repo, target_commit_ref: str, simil
         repo: Git repository object
         target_commit_ref: Reference to the target commit we're looking for
         similarity_threshold: Minimum similarity ratio (0.0-1.0) to consider a match
+        until_ref: Optional ref to limit search to (e.g., upstream branch)
 
     Returns:
         Commit hash of similar commit if found, None otherwise
@@ -781,12 +782,16 @@ def find_similar_commit_by_message(repo: git.Repo, target_commit_ref: str, simil
         # Search from 1 second before target date to avoid time precision issues
         search_since = target_date - timedelta(seconds=1)
 
-        # Get commit log with date filtering (no --until means search until now)
+        # Get commit log with date filtering
         log_args = [
             '--oneline',
             '--since', search_since.strftime('%Y-%m-%d %H:%M:%S'),
             '--format=%H %s'  # Hash and subject line
         ]
+
+        # If until_ref is specified, search only in that ref's history
+        if until_ref:
+            log_args.append(until_ref)  # Search only in that ref's history
 
         commit_lines = repo.git.log(*log_args).strip()
         if not commit_lines:
