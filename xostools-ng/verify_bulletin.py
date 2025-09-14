@@ -79,6 +79,7 @@ class VerificationResult:
     message: str
     applied_commit: Optional[str] = None  # The actual applied commit if found
     method: Optional[str] = None  # How the patch was found (direct, similar)
+    patch_info: Optional[Dict[str, Any]] = None  # Original patch information including CVE data
 
 
 def setup_progress_bar(total_tasks: int, console):
@@ -134,7 +135,8 @@ def process_repo_bucket(repo_path, repo_tasks, verifier, progress, verify_task, 
                 task.patch_info['ref'],
                 task.patch_info['url'],
                 False,
-                f"exception: {str(e)}"
+                f"exception: {str(e)}",
+                patch_info=task.patch_info
             )
             bucket_results.append(failed_result)
 
@@ -198,7 +200,7 @@ def perform_single_verification(task: VerificationTask, verifier: 'BulletinVerif
     project_path = get_android_top() / mapping.local_path
 
     if not project_path.exists():
-        return VerificationResult(mapping.local_path, patch_ref, patch_url, False, "directory not found")
+        return VerificationResult(mapping.local_path, patch_ref, patch_url, False, "directory not found", patch_info=patch_info)
 
     try:
         # Acquire repository lock to prevent concurrent git operations
@@ -225,7 +227,7 @@ def perform_single_verification(task: VerificationTask, verifier: 'BulletinVerif
             try:
                 aosp_remote = safe_get_remote(repo, 'aosp')
                 if not aosp_remote:
-                    return VerificationResult(mapping.local_path, patch_ref, patch_url, False, "aosp remote not found")
+                    return VerificationResult(mapping.local_path, patch_ref, patch_url, False, "aosp remote not found", patch_info=patch_info)
 
                 if until_arg:
                     try:
@@ -254,7 +256,8 @@ def perform_single_verification(task: VerificationTask, verifier: 'BulletinVerif
                     True,
                     "patch directly applied",
                     applied_commit=patch_ref,
-                    method="direct"
+                    method="direct",
+                    patch_info=patch_info
                 )
             except git.exc.GitCommandError:
                 # Commit is not directly in current branch
@@ -271,7 +274,8 @@ def perform_single_verification(task: VerificationTask, verifier: 'BulletinVerif
                     True,
                     "similar commit found (fuzzy match)",
                     applied_commit=existing_commit,
-                    method="similar"
+                    method="similar",
+                    patch_info=patch_info
                 )
             else:
                 verifier.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
@@ -284,17 +288,138 @@ def perform_single_verification(task: VerificationTask, verifier: 'BulletinVerif
 
 
 class BulletinVerifier:
-    def __init__(self, bulletin_dates: List[str], android_version: str, max_workers: int = 4, verbose: bool = False):
+    def __init__(self, bulletin_dates: List[str], android_version: str, max_workers: int = 4, verbose: bool = False, update_security_patch_level: bool = False):
         self.bulletin_dates = bulletin_dates
         self.android_version = android_version
         self.max_workers = max_workers
         self.verbose = verbose
+        self.update_security_patch_level = update_security_patch_level
         self.top = get_android_top()
 
     def verbose_print(self, message):
         """Print message only if verbose mode is enabled."""
         if self.verbose:
             console.print(message)
+
+    def update_security_patch_level_and_commit(self, latest_bulletin_date: str, verified_patches: List[VerificationResult]) -> bool:
+        """Update security patch level and create a git commit with CVE information."""
+        import os
+        from pathlib import Path
+
+        custom_product_dir = os.getenv('CUSTOM_PRODUCT_DIR')
+        if not custom_product_dir:
+            console.print("[yellow]CUSTOM_PRODUCT_DIR not set, skipping security patch level update[/yellow]")
+            return False
+
+        custom_product_path = Path(custom_product_dir)
+
+        # Check if we're in a git repository
+        try:
+            repo = git.Repo(custom_product_path)
+        except git.exc.InvalidGitRepositoryError:
+            console.print(f"[red]{custom_product_path} is not a git repository[/red]")
+            return False
+
+        # Find the release codename directory in product/halogenOS/release/flag_values/
+        release_flag_values_dir = custom_product_path / "release/flag_values"
+        if not release_flag_values_dir.exists():
+            console.print(f"[yellow]No release directory found at {release_flag_values_dir}, skipping security patch level update[/yellow]")
+            return False
+
+        # Find the release codename (should be only one directory)
+        release_codename = None
+        for item in release_flag_values_dir.iterdir():
+            if item.is_dir():
+                release_codename = item.name
+                break
+
+        if not release_codename:
+            console.print(f"[red]Could not find release codename directory in {release_flag_values_dir}[/red]")
+            return False
+
+        console.print(f"[cyan]Found release codename: {release_codename}[/cyan]")
+
+        # Path to the security patch file
+        security_patch_file = release_flag_values_dir / release_codename / "RELEASE_PLATFORM_SECURITY_PATCH.textproto"
+
+        # Read current security patch level if file exists
+        current_patch_level = None
+        if security_patch_file.exists():
+            try:
+                with open(security_patch_file, 'r') as f:
+                    content = f.read()
+                    # Extract current patch level
+                    import re
+                    match = re.search(r'string_value:\s*"([^"]+)"', content)
+                    if match:
+                        current_patch_level = match.group(1)
+            except Exception as e:
+                console.print(f"[yellow]Could not read current security patch level: {e}[/yellow]")
+
+        if current_patch_level == latest_bulletin_date:
+            console.print(f"[yellow]Security patch level is already {latest_bulletin_date}[/yellow]")
+            return True
+
+        # Content for the security patch file (following the format from build/release)
+        content = f'''name: "RELEASE_PLATFORM_SECURITY_PATCH"
+value {{
+  string_value: "{latest_bulletin_date}"
+}}
+'''
+
+        try:
+            # Create directory if it doesn't exist
+            security_patch_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Write the security patch file
+            with open(security_patch_file, 'w') as f:
+                f.write(content)
+
+            console.print(f"[green]Updated security patch level to {latest_bulletin_date} in {security_patch_file}[/green]")
+
+            # Create git commit with CVE information
+            relative_file_path = security_patch_file.relative_to(custom_product_path)
+
+            # Build commit message similar to the LineageOS example
+            commit_message = f"Bump Security String to {latest_bulletin_date}\n\n"
+
+            # Group patches by CVE information
+            cve_info = {}
+            for result in verified_patches:
+                patch_info = result.patch_info or {}
+                cve = patch_info.get('cve')
+                severity = patch_info.get('severity', 'Unknown')
+                patch_type = patch_info.get('type', 'Unknown')
+
+                if cve and cve.startswith('CVE-'):
+                    if cve not in cve_info:
+                        cve_info[cve] = {
+                            'severity': severity,
+                            'type': patch_type,
+                            'patches': []
+                        }
+                    cve_info[cve]['patches'].append(result)
+
+            if cve_info:
+                commit_message += "Implemented:\n"
+                for cve, info in sorted(cve_info.items()):
+                    commit_message += f"* {cve} ({info['type']}) (Severity: {info['severity']})\n"
+                commit_message += "\n"
+
+            commit_message += f"Verified {len(verified_patches)} security patches for Android {self.android_version}"
+
+            # Stage the file
+            repo.git.add(str(relative_file_path))
+
+            # Create commit
+            repo.git.commit('-m', commit_message)
+
+            console.print(f"[green]Created commit: Bump Security String to {latest_bulletin_date}[/green]")
+            return True
+
+        except Exception as e:
+            console.print(f"[red]Failed to update security patch level: {e}[/red]")
+            return False
 
     def run_repo_command(self, command: str) -> bool:
         """Run a repo command in the Android tree."""
@@ -501,6 +626,21 @@ class BulletinVerifier:
         if unverified_patches:
             console.print(f"[red]Unverified patches:[/red] {len(unverified_patches)}")
 
+        # Update security patch level if requested and all patches are verified
+        if self.update_security_patch_level:
+            if unverified_patches:
+                console.print(f"[red]Cannot update security patch level: {len(unverified_patches)} patches are unverified[/red]")
+            else:
+                # Find the latest bulletin date
+                latest_bulletin_date = max(self.bulletin_dates)
+                console.print(f"\n[cyan]All patches verified! Updating security patch level to {latest_bulletin_date}...[/cyan]")
+                success = self.update_security_patch_level_and_commit(latest_bulletin_date, verified_patches)
+                if success:
+                    console.print("[green]Security patch level updated and committed successfully![/green]")
+                else:
+                    console.print("[red]Failed to update security patch level[/red]")
+                    return 1
+
         console.print("\n[bold green]Verification done.[/bold green]")
 
         # Return error code if there were unverified patches
@@ -516,6 +656,7 @@ Examples:
   %(prog)s 2025-09-01 --android-version 15          # Verify patches for Android 15
   %(prog)s 2025-09-01 --android-version 16          # Verify patches for Android 16
   %(prog)s 2025-07-01 2025-08-01 --android-version 16  # Multiple bulletins
+  %(prog)s 2025-09-01 --android-version 15 --update-security-patch-level  # Verify and update security patch level
         """
     )
 
@@ -544,6 +685,12 @@ Examples:
         help="Number of parallel workers (default: 4)"
     )
 
+    parser.add_argument(
+        "--update-security-patch-level",
+        action="store_true",
+        help="Update security patch level and create commit if all patches are verified"
+    )
+
     args = parser.parse_args()
 
     try:
@@ -551,7 +698,8 @@ Examples:
             bulletin_dates=args.bulletin_dates,
             android_version=args.android_version,
             max_workers=args.workers,
-            verbose=args.verbose
+            verbose=args.verbose,
+            update_security_patch_level=args.update_security_patch_level
         )
 
         return verifier.run()
