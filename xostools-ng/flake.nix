@@ -27,6 +27,7 @@
             gitpython
             lxml
             pygithub
+            python-gitlab
           ];
 
           installPhase = ''
@@ -180,6 +181,7 @@
             requests
             beautifulsoup4
             rapidfuzz
+            python-gitlab
             xos-common
           ];
 
@@ -208,6 +210,7 @@
             lxml
             rich
             pygithub
+            python-gitlab
             requests
             beautifulsoup4
             rapidfuzz

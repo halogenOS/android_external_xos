@@ -48,7 +48,9 @@ from xos_common import (
     filter_patches_by_android_version,
     find_similar_commit_by_message,
     track_project_in_xos,
-    find_project_in_default_manifest
+    find_project_in_default_manifest,
+    create_xos_repo,
+    get_project_path
 )
 
 from fetch_bulletin import get_bulletin_patches
@@ -747,7 +749,7 @@ value {{
 
         return tasks
 
-    def execute_pushes(self, successful_picks: List[CherryPickResult]) -> Tuple[int, List[Tuple[str, str]]]:
+    def execute_pushes(self, successful_picks: List[CherryPickResult], manifest_path: Optional[Path] = None) -> Tuple[int, List[Tuple[str, str]]]:
         """Execute all push operations at the end."""
         # Filter out results that don't need pushing (e.g., already applied patches)
         pushable_picks = [pick for pick in successful_picks if pick.needs_push and pick.push_command]
@@ -759,6 +761,17 @@ value {{
         if not pushable_picks:
             console.print("[blue]No repositories need pushing (all patches were already applied)[/blue]")
             return 0, []
+
+        # Parse manifest to get XOS remote configuration
+        xos_remote_url = None
+        if manifest_path:
+            try:
+                manifest = ManifestParser(manifest_path)
+                xos_remote_config = manifest.get_remote_config("XOS")
+                if xos_remote_config and xos_remote_config.get('fetch'):
+                    xos_remote_url = xos_remote_config['fetch']
+            except Exception as e:
+                console.print(f"[yellow]Warning: Could not parse manifest for remote info: {e}[/yellow]")
 
         console.print(f"\n[bold cyan]Pushing {len(pushable_picks)} repositories with new cherry-picks...[/bold cyan]")
 
@@ -779,6 +792,29 @@ value {{
             for result in pushable_picks:
                 try:
                     project_path = self.top / result.project_path
+                    repo = git.Repo(project_path)
+
+                    # Extract remote name from push command (e.g., "git push XOS branch" -> "XOS")
+                    push_parts = result.push_command.split()
+                    remote_name = push_parts[2] if len(push_parts) > 2 else "XOS"
+
+                    # Check if remote repository exists if we have the base URL
+                    if xos_remote_url and remote_name == "XOS":
+                        repo_name = get_project_path(result.project_path)
+                        remote_repo_url = f"{xos_remote_url}/{repo_name}"
+
+                        try:
+                            # Try to ls-remote the repository
+                            repo.git.ls_remote(remote_repo_url)
+                        except git.exc.GitCommandError:
+                            # Repository doesn't exist - create it
+                            console.print(f"[yellow]Repository {repo_name} does not exist, creating...[/yellow]")
+                            if not create_xos_repo(repo_name):
+                                push_failures.append((result.project_path, "Failed to create repository"))
+                                console.print(f"[red]✗[/red] {result.project_path}: Failed to create repository")
+                                progress.update(push_task, advance=1)
+                                continue
+                            console.print(f"[green]✓[/green] Created repository {repo_name}")
 
                     # Execute push command
                     push_result = subprocess.run(
@@ -972,7 +1008,7 @@ value {{
 
         # Only push when --push-only is specified
         if successful_picks and not self.dry_run and self.push_only:
-            push_successes, push_failures = self.execute_pushes(successful_picks)
+            push_successes, push_failures = self.execute_pushes(successful_picks, manifest_path)
 
         # Clean up temporary manifest
         cleanup_manifest(manifest_path, self.dry_run)

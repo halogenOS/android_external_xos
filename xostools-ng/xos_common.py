@@ -385,6 +385,59 @@ def create_github_repo(repo_name: str, github_token: str) -> bool:
         print(f"Failed to create GitHub repository {repo_name}: {e}")
         return False
 
+def get_gitlab_token() -> Optional[str]:
+    """Read GitLab token from credentials file."""
+    token_path = Path.home() / ".creds" / "xos_gitlab_token"
+    try:
+        with open(token_path, 'r') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"Error reading GitLab token: {e}")
+        return None
+
+def create_xos_repo(repo_name: str) -> bool:
+    """Create a XOS repository on the GitLab server using the API."""
+    try:
+        import gitlab
+
+        gitlab_token = get_gitlab_token()
+        if not gitlab_token:
+            console.print("[yellow]Warning: No GitLab token found, cannot create repository[/yellow]")
+            return False
+
+        # GitLab configuration (configurable through environment variables)
+        GITLAB_URL = os.environ.get('XOS_GITLAB_URL', 'https://git.halogenos.org')
+        GROUP_ID = int(os.environ.get('XOS_GITLAB_GROUP_ID', '108'))  # halogenOS group ID
+
+        gl = gitlab.Gitlab(GITLAB_URL, private_token=gitlab_token)
+        gl.auth()
+
+        # Check if repository already exists
+        group = gl.groups.get(GROUP_ID)
+        try:
+            existing_project = group.projects.get(repo_name)
+            console.print(f"[blue]Repository {repo_name} already exists[/blue]")
+            return True
+        except gitlab.exceptions.GitlabGetError:
+            pass  # Repository doesn't exist, continue to create
+
+        # Create the repository
+        project_data = {
+            'name': repo_name,
+            'namespace_id': GROUP_ID,
+            'visibility': 'public'
+        }
+
+        project = gl.projects.create(project_data)
+        console.print(f"[green]Created GitLab repository: {repo_name}[/green]")
+        return True
+
+    except Exception as e:
+        console.print(f"[red]Failed to create GitLab repository {repo_name}: {e}[/red]")
+        return False
+
 # Global console for shared use
 console = Console()
 
