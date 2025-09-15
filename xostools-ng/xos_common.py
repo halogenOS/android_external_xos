@@ -402,6 +402,20 @@ def get_gitlab_token() -> Optional[str]:
         print(f"Error reading GitLab token: {e}")
         return None
 
+def check_if_xos_repo_exists(repo_url: str, repo_path: Path) -> bool:
+    """Check if XOS repository exists using git ls-remote."""
+    try:
+        repo = git.Repo(repo_path)
+        # Disable authentication prompts for the existence check
+        with repo.git.custom_environment(GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='true'):
+            repo.git.ls_remote(repo_url)
+        return True
+    except git.exc.GitCommandError:
+        return False
+    except Exception as e:
+        console.print(f"[yellow]Error checking repository existence: {e}[/yellow]")
+        return False
+
 def create_xos_repo(repo_name: str) -> bool:
     """Create a XOS repository on the GitLab server using the API."""
     try:
@@ -414,15 +428,6 @@ def create_xos_repo(repo_name: str) -> bool:
 
         gl = gitlab.Gitlab(GITLAB_URL, private_token=gitlab_token)
         gl.auth()
-
-        # Check if repository already exists
-        group = gl.groups.get(GITLAB_GROUP_ID)
-        try:
-            existing_project = group.projects.get(repo_name)
-            console.print(f"[blue]Repository {repo_name} already exists[/blue]")
-            return True
-        except gitlab.exceptions.GitlabGetError:
-            pass  # Repository doesn't exist, continue to create
 
         # Create the repository
         project_data = {

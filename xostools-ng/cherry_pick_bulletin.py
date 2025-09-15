@@ -50,7 +50,10 @@ from xos_common import (
     track_project_in_xos,
     find_project_in_default_manifest,
     create_xos_repo,
-    get_project_path
+    get_project_path,
+    safe_add_or_update_remote,
+    check_if_xos_repo_exists,
+    get_xos_target_branch_for_tracked_project
 )
 
 from fetch_bulletin import get_bulletin_patches
@@ -90,6 +93,9 @@ class CherryPickResult:
     message: str
     needs_push: bool = False
     push_command: Optional[str] = None
+    push_remote: Optional[str] = None
+    push_local_branch: Optional[str] = None
+    push_remote_branch: Optional[str] = None
     had_lfs: bool = False
     used_existing_branch: bool = False
     verbose_only: bool = False
@@ -438,14 +444,14 @@ def handle_lfs_cleanup_if_needed(project_path, mapping, patch_ref, patch_url, dr
     return had_lfs, None
 
 
-def create_push_command(onto, security_patch_level, branch_name, mapping):
-    """Create appropriate push command based on branching strategy."""
+def get_push_parameters(onto, security_patch_level, branch_name, mapping):
+    """Get push parameters for GitPython based on branching strategy."""
     if onto and (security_patch_level or branch_name):
         target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
-        return f"git push {mapping.remote} {target_branch_name}"
+        return "XOS", target_branch_name, target_branch_name  # remote, local_branch, remote_branch
     else:
-        target_branch = mapping.revision
-        return f"git push {mapping.remote} HEAD:{target_branch}"
+        target_branch = get_xos_target_branch_for_tracked_project(mapping.local_path)
+        return "XOS", target_branch, target_branch  # remote, local_branch, remote_branch
 
 
 def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picker: 'BulletinCherryPicker' = None, progress=None, bucket_task=None) -> CherryPickResult:
@@ -536,7 +542,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
             if lfs_error_result:
                 return lfs_error_result
 
-            push_cmd = create_push_command(onto, security_patch_level, branch_name, mapping)
+            remote_name, local_branch, remote_branch = get_push_parameters(onto, security_patch_level, branch_name, mapping)
 
             return CherryPickResult(
                 mapping.local_path,
@@ -545,7 +551,9 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 True,
                 "cherry-pick completed successfully",
                 needs_push=True,
-                push_command=push_cmd,
+                push_remote=remote_name,
+                push_local_branch=local_branch,
+                push_remote_branch=remote_branch,
                 had_lfs=had_lfs,
                 used_existing_branch=used_existing_branch
             )
@@ -652,63 +660,6 @@ class BulletinCherryPicker:
         for repo_path in unique_repos:
             self.setup_single_repository_branch(repo_path, onto_ref)
 
-    def update_security_patch_level(self, latest_bulletin_date: str):
-        """Update security patch level after successful cherry-picking."""
-        import os
-        from pathlib import Path
-
-        custom_product_dir = os.getenv('CUSTOM_PRODUCT_DIR')
-        if not custom_product_dir:
-            console.print("[yellow]CUSTOM_PRODUCT_DIR not set, skipping security patch level update[/yellow]")
-            return False
-
-        # Find the release codename directory in product/halogenOS/release/flag_values/
-        release_flag_values_dir = Path(custom_product_dir) / "release/flag_values"
-        if not release_flag_values_dir.exists():
-            console.print(f"[yellow]No release directory found at {release_flag_values_dir}, skipping security patch level update[/yellow]")
-            return False
-
-        # Find the release codename (should be only one directory)
-        release_codename = None
-        for item in release_flag_values_dir.iterdir():
-            if item.is_dir():
-                release_codename = item.name
-                break
-
-        if not release_codename:
-            console.print(f"[red]Could not find release codename directory in {release_flag_values_dir}[/red]")
-            return False
-
-        console.print(f"[cyan]Found release codename: {release_codename}[/cyan]")
-
-        # Path to the security patch file
-        security_patch_file = release_flag_values_dir / release_codename / "RELEASE_PLATFORM_SECURITY_PATCH.textproto"
-
-        # Content for the security patch file (following the format from build/release)
-        content = f'''name: "RELEASE_PLATFORM_SECURITY_PATCH"
-value {{
-  string_value: "{latest_bulletin_date}"
-}}
-'''
-
-        try:
-            if not self.dry_run:
-                # Create directory if it doesn't exist
-                security_patch_file.parent.mkdir(parents=True, exist_ok=True)
-
-                # Write the security patch file
-                with open(security_patch_file, 'w') as f:
-                    f.write(content)
-
-                console.print(f"[green]Updated security patch level to {latest_bulletin_date} in {security_patch_file}[/green]")
-            else:
-                console.print(f"[blue]Would update security patch level to {latest_bulletin_date} in {security_patch_file}[/blue]")
-
-            return True
-
-        except Exception as e:
-            console.print(f"[red]Failed to update security patch level: {e}[/red]")
-            return False
 
     def run_repo_command(self, command: str) -> bool:
         """Run a repo command in the Android tree."""
@@ -773,7 +724,7 @@ value {{
 
     def get_pushable_picks(self, successful_picks: List[CherryPickResult]):
         """Filter results that need pushing."""
-        return [pick for pick in successful_picks if pick.needs_push and pick.push_command]
+        return [pick for pick in successful_picks if pick.needs_push and pick.push_remote and pick.push_local_branch and pick.push_remote_branch]
 
     def get_xos_remote_url(self, manifest_path: Optional[Path]):
         """Extract XOS remote URL from manifest."""
@@ -789,20 +740,31 @@ value {{
             console.print(f"[yellow]Warning: Could not parse manifest for remote info: {e}[/yellow]")
         return None
 
+    def convert_https_to_ssh_url(self, https_url: str) -> str:
+        """Convert HTTPS Git URL to SSH format for pushing."""
+        if not https_url.startswith("https://"):
+            return https_url
+
+        # Parse https://domain.com/group -> git@domain.com:group
+        import re
+        match = re.match(r'https://([^/]+)/(.+)', https_url)
+        if match:
+            domain = match.group(1)
+            path = match.group(2)
+            return f"git@{domain}:{path}"
+
+        return https_url
+
     def ensure_remote_repository_exists(self, result, xos_remote_url):
         """Create remote repository if it doesn't exist."""
-        push_parts = result.push_command.split()
-        remote_name = push_parts[2] if len(push_parts) > 2 else "XOS"
+        remote_name = result.push_remote or "XOS"
 
         if xos_remote_url and remote_name == "XOS":
             project_path = self.top / result.project_path
-            repo = git.Repo(project_path)
             repo_name = get_project_path(result.project_path)
             remote_repo_url = f"{xos_remote_url}/{repo_name}"
 
-            try:
-                repo.git.ls_remote(remote_repo_url)
-            except git.exc.GitCommandError:
+            if not check_if_xos_repo_exists(remote_repo_url, project_path):
                 console.print(f"[yellow]Repository {repo_name} does not exist, creating...[/yellow]")
                 if not create_xos_repo(repo_name):
                     return False, "Failed to create repository"
@@ -810,27 +772,120 @@ value {{
         return True, None
 
     def execute_single_push(self, result):
-        """Execute push for a single repository."""
+        """Execute push for a single repository using GitPython."""
         try:
             project_path = self.top / result.project_path
-            push_result = subprocess.run(
-                result.push_command,
-                shell=True,
-                cwd=project_path,
-                capture_output=True,
-                text=True
-            )
+            repo = git.Repo(project_path)
 
-            if push_result.returncode == 0:
-                console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
-                return True, None
-            else:
-                console.print(f"[red]✗[/red] {result.project_path}: Push failed: {push_result.stderr}")
-                return False, push_result.stderr
+            # Get the remote
+            remote = repo.remotes[result.push_remote]
+
+            # Push using GitPython
+            push_info = remote.push(f"{result.push_local_branch}:{result.push_remote_branch}")
+
+            # Check if push was successful
+            for info in push_info:
+                if info.flags & info.ERROR:
+                    console.print(f"[red]✗[/red] {result.project_path}: Push failed: {info.summary}")
+                    return False, info.summary
+                elif info.flags & info.REJECTED:
+                    console.print(f"[red]✗[/red] {result.project_path}: Push rejected: {info.summary}")
+                    return False, info.summary
+
+            console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
+            return True, None
 
         except Exception as e:
             console.print(f"[red]✗[/red] {result.project_path}: Push exception: {e}")
             return False, str(e)
+
+    def execute_single_push_with_progress(self, result, progress, push_task, xos_remote_url=None):
+        """Execute push for a single repository with progress updates and git visibility."""
+        try:
+            # First ensure remote repository exists if needed
+            if xos_remote_url:
+                repo_created, create_error = self.ensure_remote_repository_exists(result, xos_remote_url)
+                if not repo_created:
+                    console.print(f"[red]✗[/red] {result.project_path}: {create_error}")
+                    return False, create_error
+
+            project_path = self.top / result.project_path
+            repo = git.Repo(project_path)
+
+            # Update progress to show current operation
+            short_path = truncate_project_name(result.project_path)
+            progress.update(push_task, description=f"[yellow]Pushing {short_path} to {result.push_remote}")
+
+            # Get the remote, handle missing remote
+            try:
+                remote = repo.remotes[result.push_remote]
+            except IndexError:
+                # If XOS remote is missing and we have the base URL, try to add it
+                if result.push_remote == "XOS" and xos_remote_url:
+                    try:
+                        repo_name = get_project_path(result.project_path)
+                        # Convert HTTPS URL to SSH URL for pushing
+                        ssh_base_url = self.convert_https_to_ssh_url(xos_remote_url)
+                        xos_url = f"{ssh_base_url}/{repo_name}"
+                        remote = safe_add_or_update_remote(repo, "XOS", xos_url)
+                        console.print(f"[blue]→[/blue] {result.project_path}: Added XOS remote {xos_url}")
+                    except Exception as e:
+                        console.print(f"[red]✗[/red] {result.project_path}: Failed to add XOS remote: {e}")
+                        return False, f"Failed to add XOS remote: {e}"
+                else:
+                    console.print(f"[red]✗[/red] {result.project_path}: Remote '{result.push_remote}' not found")
+                    return False, f"Remote '{result.push_remote}' not configured in repository"
+
+            # Push using GitPython with progress callback
+            push_ref = f"{result.push_local_branch}:{result.push_remote_branch}"
+
+            console.print(f"  [blue]→[/blue] {result.project_path}: git push {result.push_remote} {push_ref}")
+
+            # Custom progress handler to show git transfer progress
+            class PushProgressHandler:
+                def __init__(self, project_path):
+                    self.project_path = project_path
+
+                def __call__(self, op_code, cur_count, max_count=None, message=''):
+                    if message:
+                        # Show git's native progress messages (upload rate, objects, etc.)
+                        console.print(f"    [dim]{self.project_path}:[/dim] {message}")
+
+            progress_handler = PushProgressHandler(result.project_path)
+
+            # Get the actual push URL from git config to ensure SSH is used
+            try:
+                push_url = repo.git.config('--get', f'remote.{result.push_remote}.pushurl')
+            except git.exc.GitCommandError:
+                # No separate push URL, use the fetch URL
+                push_url = remote.url
+
+            # Configure git to fail immediately if authentication is required
+            # This prevents hanging on password prompts
+            with repo.git.custom_environment(GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='true'):
+                try:
+                    # Use git command directly with explicit URL to ensure proper SSH usage
+                    push_output = repo.git.push(push_url, push_ref, '--progress', with_extended_output=True)
+                    console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
+
+                    # Show git's progress output (stderr contains the progress info)
+                    if hasattr(push_output, 'stderr') and push_output.stderr:
+                        for line in push_output.stderr.split('\n'):
+                            if line.strip() and ('Enumerating' in line or 'Counting' in line or 'Writing' in line or 'Total' in line):
+                                console.print(f"    [dim]{result.project_path}:[/dim] {line}")
+
+                    return True, None
+                except git.exc.GitCommandError as e:
+                    error_msg = str(e)
+                    console.print(f"[red]✗[/red] {result.project_path}: Push failed: {error_msg}")
+                    return False, error_msg
+
+        except Exception as e:
+            console.print(f"[red]✗[/red] {result.project_path}: Push exception: {e}")
+            return False, str(e)
+        finally:
+            # Update progress bar
+            progress.update(push_task, advance=1)
 
     def execute_pushes(self, successful_picks: List[CherryPickResult], manifest_path: Optional[Path] = None) -> Tuple[int, List[Tuple[str, str]]]:
         """Execute all push operations at the end."""
@@ -861,21 +916,27 @@ value {{
 
             push_task = progress.add_task("[cyan]Pushing changes", total=len(pushable_picks))
 
-            for result in pushable_picks:
-                repo_created, create_error = self.ensure_remote_repository_exists(result, xos_remote_url)
-                if not repo_created:
-                    push_failures.append((result.project_path, create_error))
-                    console.print(f"[red]✗[/red] {result.project_path}: {create_error}")
-                    progress.update(push_task, advance=1)
-                    continue
+            # Use ThreadPoolExecutor for concurrent pushes
+            max_push_workers = min(self.max_workers, len(pushable_picks))
+            with ThreadPoolExecutor(max_workers=max_push_workers) as executor:
+                # Submit all push tasks
+                future_to_result = {}
+                for result in pushable_picks:
+                    # Submit push task with repository creation handled in worker
+                    future = executor.submit(self.execute_single_push_with_progress, result, progress, push_task, xos_remote_url)
+                    future_to_result[future] = result
 
-                success, error = self.execute_single_push(result)
-                if success:
-                    push_successes += 1
-                else:
-                    push_failures.append((result.project_path, error))
-
-                progress.update(push_task, advance=1)
+                # Process completed pushes
+                for future in as_completed(future_to_result):
+                    result = future_to_result[future]
+                    try:
+                        success, error = future.result()
+                        if success:
+                            push_successes += 1
+                        else:
+                            push_failures.append((result.project_path, error))
+                    except Exception as e:
+                        push_failures.append((result.project_path, f"Push exception: {str(e)}"))
 
         return push_successes, push_failures
 
@@ -1022,8 +1083,34 @@ value {{
     def execute_cherry_picks_or_push_only(self, tasks):
         """Execute cherry-picks or handle push-only mode."""
         if self.push_only:
-            console.print(f"[blue]Push-only mode: Assuming all {len(tasks)} patches are already cherry-picked[/blue]")
-            return [], []
+            console.print(f"[blue]Push-only mode: Creating push tasks for {len(tasks)} repositories[/blue]")
+            pushable_results = []
+            unique_repos = {}
+
+            # Get unique repositories from tasks
+            for task in tasks:
+                repo_path = task.project_mapping.local_path
+                if repo_path not in unique_repos:
+                    unique_repos[repo_path] = task
+
+            # Create push results for all repositories
+            for repo_path, task in unique_repos.items():
+                mapping = task.project_mapping
+                remote_name, local_branch, remote_branch = get_push_parameters(task.onto, task.security_patch_level, task.branch_name, mapping)
+                result = CherryPickResult(
+                    repo_path,
+                    "push-only",
+                    "",
+                    True,
+                    "ready for push",
+                    needs_push=True,
+                    push_remote=remote_name,
+                    push_local_branch=local_branch,
+                    push_remote_branch=remote_branch
+                )
+                pushable_results.append(result)
+
+            return pushable_results, []
         else:
             return self.process_cherry_picks(tasks)
 
@@ -1057,12 +1144,6 @@ value {{
             for project_path, error in push_failures:
                 console.print(f"  [red]- {project_path}:[/red] {error}")
 
-    def update_security_patch_level_if_successful(self, successful_picks, failed_picks):
-        """Update security patch level if all operations were successful."""
-        if successful_picks and not failed_picks:
-            latest_bulletin_date = max(self.bulletin_dates)
-            console.print(f"\n[cyan]Updating security patch level to {latest_bulletin_date}...[/cyan]")
-            self.update_security_patch_level(latest_bulletin_date)
 
     def run(self):
         """Main execution flow."""
@@ -1087,7 +1168,6 @@ value {{
         cleanup_manifest(manifest_path, self.dry_run)
 
         self.print_summary(successful_picks, failed_picks, push_successes, push_failures, tasks)
-        self.update_security_patch_level_if_successful(successful_picks, failed_picks)
 
         console.print("\n[bold green]Everything done.[/bold green]")
         return 1 if (failed_picks or push_failures) else 0

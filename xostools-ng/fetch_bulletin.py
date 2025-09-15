@@ -40,15 +40,15 @@ def parse_metadata_line(line):
     """Parse a metadata line in Key: Value format."""
     if ':' not in line or line.rstrip().endswith(':'):
         return None, None
-    
+
     key, value = line.split(':', 1)
     key = key.strip()
     value = value.strip()
-    
+
     # Skip if no whitespace after colon or whitespace before colon
     if not value or key != key.rstrip():
         return None, None
-    
+
     return key, value
 
 
@@ -56,7 +56,7 @@ def collect_multiline_value(lines, start_index, initial_value):
     """Collect multiline value from continuation lines."""
     full_value = initial_value
     i = start_index + 1
-    
+
     while i < len(lines):
         next_line = lines[i]
         # If next line doesn't start at column 0 and doesn't contain ':', it's a continuation
@@ -69,7 +69,7 @@ def collect_multiline_value(lines, start_index, initial_value):
         else:
             # Next line starts a new key or is not a continuation
             break
-    
+
     return full_value, i
 
 
@@ -131,7 +131,7 @@ def extract_repo_name_from_url(repo_url):
     """Extract repository name from URL."""
     if '/platform/' not in repo_url:
         return None
-    
+
     repo_name = repo_url.split('/platform/', 1)[1]
     if repo_name.endswith('.git'):
         repo_name = repo_name[:-4]
@@ -152,7 +152,7 @@ def find_local_repo_path(android_top, repo_name):
         project_name = project.get('name')
         if project_name == repo_name:
             return project.get('path', project_name)
-    
+
     return None
 
 
@@ -173,7 +173,7 @@ def extract_base_repo_url(repo_url):
     # Add .git if not present
     if not base_url.endswith('.git'):
         base_url += '.git'
-    
+
     return base_url
 
 
@@ -211,7 +211,7 @@ def get_commit_from_repo(repo, commit_ref, repo_url, repo_name, progress, commit
 def fetch_commit_info(repo_url, commit_ref, progress_task=None, progress=None):
     """Fetch commit information from existing repository in Android source tree."""
     debug_print(f"[magenta]DEBUG: fetch_commit_info called with repo_url={repo_url} commit_ref={commit_ref}[/magenta]")
-    
+
     try:
         # Get Android source root
         android_top = get_android_top()
@@ -374,7 +374,7 @@ def clean_reference_text(ref_text):
     """Clean reference text by removing footnote markers."""
     if not ref_text:
         return []
-    
+
     # Split by comma if multiple references
     refs = [ref.strip() for ref in ref_text.split(',') if ref.strip()]
     # Clean up footnote markers like [1], [2], [3] etc.
@@ -436,7 +436,7 @@ def extract_row_information(cells, column_indices):
 def collect_git_links_from_row(cells):
     """Collect all git links from table row cells."""
     git_links = []
-    
+
     for cell in cells:
         for link in cell.find_all('a', href=True):
             href = link.get('href')
@@ -450,7 +450,7 @@ def collect_git_links_from_row(cells):
             # Check for git source links with commit references
             if '/+/' in href or '/-/commit/' in href or '/commit/' in href:
                 git_links.append(href)
-    
+
     return git_links
 
 
@@ -465,7 +465,7 @@ def create_patch_info(patch_info, row_info, current_component):
     # Ensure android_versions is always present, set to null if empty
     if 'android_versions' not in patch_info:
         patch_info['android_versions'] = None
-    
+
     return patch_info
 
 
@@ -535,13 +535,13 @@ def find_patch_level_headings(soup):
     """Find all security patch level headings in the HTML."""
     patch_level_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})\s+security patch level', re.IGNORECASE)
     patch_level_headings = []
-    
+
     for heading in soup.find_all(['h2', 'h3', 'h4']):
         heading_text = heading.get_text(strip=True)
         match = patch_level_pattern.search(heading_text)
         if match:
             patch_level_headings.append((heading, match.group(1)))
-    
+
     return patch_level_headings
 
 
@@ -550,7 +550,7 @@ def process_patch_level_content(heading, patch_level, patch_level_task, progress
     patch_level_pattern = re.compile(r'(\d{4}-\d{2}-\d{2})\s+security patch level', re.IGNORECASE)
     patches = []
     current_component = None
-    
+
     # Find content after this heading until next patch level or end
     current = heading.find_next_sibling()
 
@@ -570,7 +570,7 @@ def process_patch_level_content(heading, patch_level, patch_level_task, progress
             patches.extend(table_patches)
 
         current = current.find_next_sibling()
-    
+
     return patches
 
 
