@@ -35,6 +35,7 @@
                 git-repo
                 glibc
                 glibc.dev
+                pkgsi686Linux.glibc.dev
                 gnumake
                 go
                 imagemagick
