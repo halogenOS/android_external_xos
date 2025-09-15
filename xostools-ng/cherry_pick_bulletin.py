@@ -563,7 +563,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
 
 
 class BulletinCherryPicker:
-    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None, force_recreate: bool = False, verbose: bool = False):
+    def __init__(self, bulletin_dates: List[str], android_version: str, dry_run: bool = False, max_workers: int = 4, push_only: bool = False, onto: Optional[str] = None, branch_name: Optional[str] = None, force_recreate: bool = False, verbose: bool = False, directory_filter: Optional[str] = None):
         self.bulletin_dates = bulletin_dates
         self.android_version = android_version
         self.dry_run = dry_run
@@ -573,6 +573,7 @@ class BulletinCherryPicker:
         self.branch_name = branch_name
         self.force_recreate = force_recreate
         self.verbose = verbose
+        self.directory_filter = directory_filter
         self.top = get_android_top()
         self.conflicted_repos = set()  # Track repos with conflicts
         self.conflict_lock = threading.Lock()  # Thread-safe access to conflicted_repos
@@ -689,6 +690,10 @@ class BulletinCherryPicker:
 
             # Create task for each matching project (in case of multiple matches)
             for mapping in matching_projects:
+                # Apply directory filter if specified
+                if self.directory_filter and mapping.local_path != self.directory_filter:
+                    continue
+
                 # Validate project exists in default manifest and track it before creating task
                 if find_project_in_default_manifest(mapping.local_path) is None:
                     console.print(f"[red]FATAL: Project {mapping.local_path} not found in default manifest[/red]")
@@ -1242,6 +1247,12 @@ Examples:
         help="Force recreate the branch specified by --branch-name even if it already exists"
     )
 
+    parser.add_argument(
+        "--directory",
+        type=str,
+        help="Only process patches for the specified directory (exact match)"
+    )
+
     args = parser.parse_args()
 
     try:
@@ -1254,7 +1265,8 @@ Examples:
             onto=args.onto,
             branch_name=args.branch_name,
             force_recreate=args.force_recreate,
-            verbose=args.verbose
+            verbose=args.verbose,
+            directory_filter=args.directory
         )
 
         return picker.run()
