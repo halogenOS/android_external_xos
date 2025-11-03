@@ -31,8 +31,6 @@ from xos_common import (
     console,
     handle_lfs_cleanup,
     safe_add_or_update_remote,
-    generate_manifest,
-    cleanup_manifest,
     truncate_project_name
 )
 
@@ -302,33 +300,37 @@ class SplineReticulator:
             if not dry_run:
                 console.print("[yellow]Note: createXos not found, repositories won't be created if missing![/yellow]")
 
-    def generate_manifest(self) -> Path:
-        """Generate temporary manifest file."""
-        return generate_manifest(self.top, self.dry_run)
+    def get_xos_snippet_path(self) -> Path:
+        """Get path to XOS.xml snippet."""
+        snippet_path = self.top / "manifest/snippets/XOS.xml"
+        if not snippet_path.exists():
+            raise FileNotFoundError(f"XOS manifest snippet not found: {snippet_path}")
+        return snippet_path
 
-    def parse_spline_tasks(self, manifest_path: Path) -> List[SplineTask]:
+    def parse_spline_tasks(self) -> List[SplineTask]:
         """Parse projects that need spline reticulation."""
         tasks = []
 
         # Parse snippets and manifests
-        snippet_path = self.top / ".repo/manifests/snippets/XOS.xml"
+        snippet_path = self.get_xos_snippet_path()
         aosp_snippet_path = self.top / ".repo/manifests/default.xml"
 
         try:
             # Get ROM revision
             rom_revision = os.environ.get('ROM_REVISION') or os.environ.get('ROM_VERSION')
 
-            manifest_tree = ET.parse(manifest_path)
-            manifest_root = manifest_tree.getroot()
+            # Parse XOS snippet to get projects and defaults
+            snippet_tree = ET.parse(snippet_path)
+            snippet_root = snippet_tree.getroot()
 
-            # Get default remote and revision
-            default = manifest_root.find('default')
+            # Get default remote and revision from XOS snippet
+            default = snippet_root.find('default')
             default_remote = default.get('remote', 'XOS') if default is not None else 'XOS'
             default_revision = default.get('revision', f'refs/heads/{rom_revision}') if default is not None else f'refs/heads/{rom_revision}'
 
-            # Build remotes map
+            # Build remotes map from XOS snippet
             remotes = {}
-            for remote in manifest_root.findall('remote'):
+            for remote in snippet_root.findall('remote'):
                 remote_name = remote.get('name')
                 remote_revision = remote.get('revision', default_revision)
                 remotes[remote_name] = remote_revision
@@ -339,23 +341,20 @@ class SplineReticulator:
             else:
                 target_paths = []
 
-                # Add projects with merge-aosp attribute
-                if snippet_path.exists():
-                    snippet_tree = ET.parse(snippet_path)
-                    snippet_root = snippet_tree.getroot()
-                    merge_aosp_paths = [p.get('path') for p in snippet_root.findall('project[@merge-aosp]')]
-                    target_paths.extend(merge_aosp_paths)
+                # Add projects with merge-aosp attribute from XOS snippet
+                merge_aosp_paths = [p.get('path') for p in snippet_root.findall('project[@merge-aosp]')]
+                target_paths.extend(merge_aosp_paths)
 
-                # Add projects with upstream attribute
-                upstream_paths = [p.get('path') for p in manifest_root.findall('project[@upstream]')]
+                # Add projects with upstream attribute from XOS snippet
+                upstream_paths = [p.get('path') for p in snippet_root.findall('project[@upstream]')]
                 target_paths.extend(upstream_paths)
 
             # Process each target path
             for path in target_paths:
-                # Find project in manifest
-                project_elem = manifest_root.find(f"project[@path='{path}']")
+                # Find project in XOS snippet
+                project_elem = snippet_root.find(f"project[@path='{path}']")
                 if project_elem is None:
-                    console.print(f"[yellow]Warning: Project {path} not found in manifest[/yellow]")
+                    console.print(f"[yellow]Warning: Project {path} not found in XOS snippet[/yellow]")
                     continue
 
                 name = project_elem.get('name')
@@ -368,12 +367,8 @@ class SplineReticulator:
                 short_revision = revision.replace('refs/heads/', '')
 
                 # Check if this is an AOSP merge project
-                is_aosp = False
-                if snippet_path.exists():
-                    snippet_tree = ET.parse(snippet_path)
-                    snippet_root = snippet_tree.getroot()
-                    aosp_project = snippet_root.find(f"project[@path='{path}'][@merge-aosp='true']")
-                    is_aosp = aosp_project is not None
+                aosp_project = snippet_root.find(f"project[@path='{path}'][@merge-aosp='true']")
+                is_aosp = aosp_project is not None
 
                 # Initialize is_tag for all projects
                 is_tag = False
@@ -467,7 +462,7 @@ class SplineReticulator:
                 tasks.append(task)
 
         except ET.ParseError as e:
-            console.print(f"[red]Failed to parse manifest: {e}[/red]")
+            console.print(f"[red]Failed to parse XOS snippet: {e}[/red]")
             raise
         except Exception as e:
             console.print(f"[red]Error parsing spline tasks: {e}[/red]")
@@ -597,11 +592,8 @@ class SplineReticulator:
     def run(self):
         """Main execution flow."""
         try:
-            console.print("[cyan]Generating temporary manifest file...[/cyan]")
-            manifest_path = self.generate_manifest()
-
             console.print("[cyan]Parsing projects for spline reticulation...[/cyan]")
-            tasks = self.parse_spline_tasks(manifest_path)
+            tasks = self.parse_spline_tasks()
 
         except Exception as e:
             console.print(f"[red]Failed to prepare spline tasks: {e}[/red]")
@@ -612,9 +604,6 @@ class SplineReticulator:
 
         # Display results in table format
         self.display_spline_results(successful_results, failed_results)
-
-        # Clean up temporary manifest
-        cleanup_manifest(manifest_path, self.dry_run)
 
         # Summary
         console.print("\n" + "=" * 60)
