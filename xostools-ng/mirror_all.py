@@ -260,6 +260,54 @@ def perform_repo_sync(args):
     console.print("[green]Sync completed successfully[/green]")
     return True
 
+def should_skip_vendor_repo(project_path: str) -> bool:
+    """Check if vendor repo should be skipped based on path components."""
+    if not project_path.startswith('vendor/'):
+        return False
+
+    # Count path components: vendor/nothing/Pong has 3 components
+    path_components = project_path.split('/')
+    return len(path_components) > 2
+
+def parse_local_manifests(top: Path) -> List[ProjectInfo]:
+    """Parse all local manifest files and return projects."""
+    local_manifests_dir = top / '.repo' / 'local_manifests'
+    projects = []
+
+    if not local_manifests_dir.exists():
+        return projects
+
+    # Find all XML files in local_manifests directory
+    xml_files = list(local_manifests_dir.glob('*.xml'))
+
+    for xml_file in xml_files:
+        try:
+            local_manifest = ManifestParser(xml_file)
+
+            # Filter for XOS remote projects only
+            xos_projects = local_manifest.get_projects_by_remote("XOS")
+
+            # Filter out vendor repos with more than 2 path components
+            filtered_projects = []
+            skipped_count = 0
+            for project in xos_projects:
+                if should_skip_vendor_repo(project.path):
+                    console.print(f"[yellow]Skipping vendor repo with >2 components: {project.path}[/yellow]")
+                    skipped_count += 1
+                else:
+                    filtered_projects.append(project)
+
+            projects.extend(filtered_projects)
+
+            if filtered_projects:
+                console.print(f"[cyan]Found {len(filtered_projects)} XOS projects in {xml_file.name}[/cyan]")
+            if skipped_count:
+                console.print(f"[yellow]Skipped {skipped_count} vendor repos in {xml_file.name}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Warning:[/yellow] Failed to parse {xml_file.name}: {e}")
+
+    return projects
+
 def main():
     parser = argparse.ArgumentParser(
         description='Mirror all repositories to GitHub'
@@ -303,7 +351,7 @@ def main():
         if not perform_repo_sync(args):
             sys.exit(1)
 
-    # Parse manifest
+    # Parse main manifest
     manifest = ManifestParser(snippet_path)
 
     # Get repo revision
@@ -314,13 +362,29 @@ def main():
 
     console.print(f"\n[bold]Using revision:[/bold] {repo_revision}")
 
-    # Get all projects
-    projects = manifest.get_projects()
-    if not projects:
-        console.print("[red]Error:[/red] No projects found in manifest")
+    # Get projects from main manifest (XOS remote only)
+    main_projects = manifest.get_projects_by_remote("XOS")
+    if not main_projects:
+        console.print("[red]Error:[/red] No XOS projects found in main manifest")
         sys.exit(1)
 
-    console.print(f"[bold]Found {len(projects)} projects to analyze[/bold]")
+    console.print(f"[bold]Found {len(main_projects)} XOS projects in main manifest[/bold]")
+
+    # Get projects from local manifests
+    local_projects = parse_local_manifests(top)
+    console.print(f"[bold]Found {len(local_projects)} projects in local manifests[/bold]")
+
+    # Combine projects and remove duplicates based on path
+    all_projects = main_projects + local_projects
+    unique_projects = {}
+    for project in all_projects:
+        if project.path not in unique_projects:
+            unique_projects[project.path] = project
+        else:
+            console.print(f"[yellow]Duplicate project path detected, using first occurrence: {project.path}[/yellow]")
+
+    projects = list(unique_projects.values())
+    console.print(f"[bold]Total unique projects to analyze: {len(projects)}[/bold]")
 
     # Get GitHub token for repo creation
     github_token = get_github_token()
