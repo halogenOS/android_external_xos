@@ -27,7 +27,7 @@ echo "PRODUCT_CERTIFICATE_OVERRIDES := \\" > "$KEYS_DIR/keys.mk"
 for key in \
     releasekey platform shared media networkstack testkey \
     bluetooth sdk_sandbox verifiedboot nfc cts_uicc_2021 \
-    cyngn-app verity; do
+    cyngn-app verity gmscompat_lib; do
     if [ ! -f "$KEYS_DIR/$key.pk8" ] || [ ! -f "$KEYS_DIR/$key.x509.pem" ]; then
         echo "Generating $key"
         checkSubject
