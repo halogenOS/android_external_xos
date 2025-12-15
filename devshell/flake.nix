@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
   };
 
   outputs =
@@ -117,7 +117,6 @@
                   {
                     LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
                     FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
-                    LD_LIBRARY_PATH = "/usr/lib64";
                     BOOTANIM_PYTHON_ENV="${bootanimPythonEnv}";
                   }
               )
