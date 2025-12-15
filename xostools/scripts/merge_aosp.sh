@@ -54,11 +54,9 @@ for path in ${list[@]}; do
     pushd "$path"
 
     if [[ ${short_revision} != $(git branch --show-current) ]]; then
-        git checkout --track $repo_remote/$short_revision || \
-        git checkout $short_revision || (
+        git switch -C $short_revision --track $repo_remote/$short_revision || (
             git fetch $repo_remote
-            git checkout $repo_remote/$short_revision -b $short_revision
-            git branch -u $repo_remote/$short_revision
+            git switch -C $short_revision --track $repo_remote/$short_revision
         )
     fi
 
