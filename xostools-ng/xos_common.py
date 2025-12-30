@@ -399,7 +399,7 @@ def get_gitlab_token() -> Optional[str]:
     except FileNotFoundError:
         return None
     except Exception as e:
-        print(f"Error reading GitLab token: {e}")
+        console.print(f"[yellow]Error reading GitLab token: {e}[/yellow]")
         return None
 
 def check_if_xos_repo_exists(repo_url: str, repo_path: Path) -> bool:
@@ -443,6 +443,28 @@ def create_xos_repo(repo_name: str) -> bool:
     except Exception as e:
         console.print(f"[red]Failed to create GitLab repository {repo_name}: {e}[/red]")
         return False
+
+def create_xos(repo_name: str) -> bool:
+    """
+    Create XOS repository on GitLab and/or GitHub depending on available tokens.
+
+    Returns True if at least one repository was created (or already exists).
+    """
+    created_anywhere = False
+
+    # Try GitLab
+    if get_gitlab_token():
+        if create_xos_repo(repo_name):
+            created_anywhere = True
+    # else: GitLab token not available, skipping (expected in some environments)
+
+    # Try GitHub
+    if get_github_token():
+        if create_github_repo(repo_name):
+            created_anywhere = True
+    # else: GitHub token not available, skipping (expected in some environments)
+
+    return created_anywhere
 
 # Global console for shared use
 console = Console()

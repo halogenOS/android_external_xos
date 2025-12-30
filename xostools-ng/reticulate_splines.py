@@ -11,7 +11,6 @@ import os
 import sys
 import signal
 import argparse
-import subprocess
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -31,7 +30,8 @@ from xos_common import (
     console,
     handle_lfs_cleanup,
     safe_add_or_update_remote,
-    truncate_project_name
+    truncate_project_name,
+    create_xos
 )
 
 # Global stop event for graceful shutdown
@@ -73,7 +73,7 @@ class SplineResult:
 
 # LFS cleanup function is now imported from xos_common
 
-def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos: bool) -> SplineResult:
+def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos: bool) -> SplineResult:
     """Perform spline reticulation for a single project."""
     project_path = task.project_path
     project_name = task.project.path
@@ -136,7 +136,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
 
             notes.append("would fetch upstream")
             notes.append("would checkout branch")
-            if has_create_xos:
+            if use_create_xos:
                 notes.append("would create repo if needed")
             notes.append("would push to XOS")
 
@@ -191,14 +191,18 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
 
         # Fetch from upstream
         console.print(f"[cyan]{project_name}:[/cyan] Fetching upstream")
-        upstream_remote.fetch()
+        try:
+            upstream_remote.fetch()
+        except git.exc.GitCommandError as e:
+            console.print(f"[yellow]{project_name}:[/yellow] Failed to fetch from upstream: {e}")
+            return SplineResult(project_name, False, "upstream fetch failed", was_skipped=True)
 
         # Fetch from XOS (may fail if repo doesn't exist)
         try:
             console.print(f"[cyan]{project_name}:[/cyan] Fetching XOS")
             xos_remote.fetch()
-        except git.exc.GitCommandError:
-            pass  # Ignore failures
+        except git.exc.GitCommandError as e:
+            console.print(f"[cyan]{project_name}:[/cyan] XOS repo doesn't exist yet (will be created)")
 
         # Check if shallow and unshallow if needed
         if GitOperations.is_shallow_repo(project_path):
@@ -217,17 +221,14 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
             upstream_ref = f"upstream/{task.upstream_rev}"
             repo.git.checkout(upstream_ref, B=task.target_branch)
 
-        # Create repository if needed (equivalent to createXos)
+        # Create repository if needed
         created_repo = False
-        if has_create_xos:
-            try:
-                console.print(f"[cyan]{project_name}:[/cyan] Creating repository (if it doesn't exist)")
-                # This would call createXos command if available
-                result = subprocess.run(["createXos"], cwd=project_path, capture_output=True, text=True)
-                if result.returncode == 0:
-                    created_repo = True
-            except (FileNotFoundError, subprocess.SubprocessError):
-                pass  # createXos not available or failed
+        if self.use_create_xos:
+            console.print(f"[cyan]{project_name}:[/cyan] Creating repository (if it doesn't exist)")
+            created_repo = create_xos(project_name)
+            if not created_repo:
+                console.print(f"[yellow]{project_name}:[/yellow] Skipping - repository creation failed (repo may already exist or tokens missing)")
+                return SplineResult(project_name, False, "repository creation failed", was_skipped=True)
 
         # Check if shallow again after checkout
         if GitOperations.is_shallow_repo(project_path):
@@ -261,7 +262,11 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, has_create_xos:
         # Push to XOS
         console.print(f"[cyan]{project_name}:[/cyan] Pushing to XOS")
         push_flags = ["-f"] if task.force_push else []
-        repo.git.push("XOS", f"HEAD:{task.target_branch}", *push_flags)
+        try:
+            repo.git.push("XOS", f"HEAD:{task.target_branch}", *push_flags)
+        except git.exc.GitCommandError as e:
+            console.print(f"[yellow]{project_name}:[/yellow] Push failed - repository may not exist or you may not have permission: {e}")
+            return SplineResult(project_name, False, "push failed", was_skipped=True)
 
         return SplineResult(
             project_name,
@@ -291,14 +296,8 @@ class SplineReticulator:
         self.single_path = single_path
         self.top = get_android_top()
 
-        # Check if createXos is available
-        self.has_create_xos = True
-        try:
-            subprocess.run(["createXos"], capture_output=True, check=False)
-        except FileNotFoundError:
-            self.has_create_xos = False
-            if not dry_run:
-                console.print("[yellow]Note: createXos not found, repositories won't be created if missing![/yellow]")
+        # Check if create_xos can be used (tokens available)
+        self.use_create_xos = True
 
     def get_xos_snippet_path(self) -> Path:
         """Get path to XOS.xml snippet."""
@@ -560,7 +559,7 @@ class SplineReticulator:
 
                 # Submit all tasks
                 futures = {
-                    executor_pool.submit(perform_single_reticulation, task, self.dry_run, self.has_create_xos): task
+                    executor_pool.submit(perform_single_reticulation, task, self.dry_run, self.use_create_xos): task
                     for task in tasks
                 }
 
