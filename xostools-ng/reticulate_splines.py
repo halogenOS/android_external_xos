@@ -659,6 +659,9 @@ class SplineReticulator:
                 # Make worker task visible and set initial status
                 task_id = worker_task_ids[slot_id]
                 project_display = truncate_project_name(spline_task.project.path, max_len=40)
+                # Reset task start time for accurate per-task elapsed time
+                progress.tasks[task_id].start_time = progress.get_time()
+                progress.tasks[task_id].stop_time = None
                 progress.update(
                     task_id,
                     description=f"  [cyan]{project_display}:[/cyan] Starting...",
