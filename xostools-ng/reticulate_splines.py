@@ -16,11 +16,19 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TaskID
 from rich.table import Table
 from dataclasses import dataclass
+from typing import Callable
 import threading
 import git
+
+# Type alias for status update callback
+# The callback takes (status: str, persistent: bool, advance: int, add_steps: int)
+# - persistent: if True, message is printed to console
+# - advance: increment progress by this amount
+# - add_steps: add this many steps to the total
+StatusCallback = Callable[[str, bool, int, int], None]
 
 from xos_common import (
     ManifestParser,
@@ -73,10 +81,29 @@ class SplineResult:
 
 # LFS cleanup function is now imported from xos_common
 
-def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos: bool) -> SplineResult:
+def perform_single_reticulation(
+    task: SplineTask,
+    dry_run: bool,
+    use_create_xos: bool,
+    status_callback: Optional[StatusCallback] = None
+) -> SplineResult:
     """Perform spline reticulation for a single project."""
     project_path = task.project_path
     project_name = task.project.path
+
+    def update_status(status: str, persistent: bool = False, advance: int = 0, add_steps: int = 0):
+        """Update progress status for this task.
+
+        Args:
+            status: The status message to display
+            persistent: If True, message is printed to console and remains visible
+            advance: Increment progress by this amount
+            add_steps: Add this many steps to the total
+        """
+        if status_callback:
+            status_callback(status, persistent, advance, add_steps)
+        else:
+            console.print(f"[cyan]{project_name}:[/cyan] {status}")
 
     try:
         if dry_run:
@@ -155,13 +182,18 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos:
 
         # Initialize git repo if needed
         if not (project_path / ".git").exists():
-            console.print(f"[cyan]{project_name}:[/cyan] Initializing git repository")
+            update_status("Initializing git repository", add_steps=1)
             git.Repo.init(project_path)
+            update_status("Initialized", advance=1)
 
         repo = git.Repo(project_path)
 
+        # Disable credential prompts - prevents hanging on auth
+        repo.git.update_environment(GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -o BatchMode=yes")
+
         # Check for unstaged changes and untracked files before proceeding
         if repo.is_dirty(untracked_files=True):
+            update_status("[red]Skipped - has unstaged changes or untracked files[/red]", persistent=True)
             return SplineResult(project_name, False, "repository has unstaged changes or untracked files, cannot proceed")
 
         # Set up XOS remote
@@ -173,9 +205,14 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos:
         repo.git.remote('set-url', '--push', 'XOS', xos_push_url)
 
         # Check if target branch already exists on remote
+        xos_repo_exists = False
         try:
+            update_status("Checking if branch exists", add_steps=1)
             xos_remote.fetch()
+            xos_repo_exists = True
+            update_status("Checked", advance=1)
             if task.target_branch in [ref.name.split('/')[-1] for ref in xos_remote.refs]:
+                update_status(f"[blue]Skipped - {task.target_branch} already exists[/blue]", persistent=True)
                 return SplineResult(
                     project_name,
                     True,
@@ -184,34 +221,39 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos:
                 )
         except git.exc.GitCommandError:
             # Remote might not exist yet, continue
-            pass
+            update_status("Checked (new repo)", advance=1)
+
+        # Unshallow BEFORE fetching from upstream - shallow repos hang when fetching new remotes
+        if GitOperations.is_shallow_repo(project_path):
+            update_status("Unshallowing repository", add_steps=1)
+            if not GitOperations.unshallow_repo(project_path):
+                return SplineResult(project_name, False, "failed to unshallow repository")
+            update_status("Unshallowed", advance=1)
 
         # Set up upstream remote
         upstream_remote = safe_add_or_update_remote(repo, 'upstream', task.upstream_url)
 
         # Fetch from upstream
-        console.print(f"[cyan]{project_name}:[/cyan] Fetching upstream")
+        update_status("Fetching upstream", add_steps=1)
         try:
             upstream_remote.fetch()
+            update_status("Fetched upstream", advance=1)
         except git.exc.GitCommandError as e:
-            console.print(f"[yellow]{project_name}:[/yellow] Failed to fetch from upstream: {e}")
+            update_status(f"[yellow]Failed to fetch upstream: {e}[/yellow]", persistent=True, advance=1)
             return SplineResult(project_name, False, "upstream fetch failed", was_skipped=True)
 
         # Fetch from XOS (may fail if repo doesn't exist)
-        try:
-            console.print(f"[cyan]{project_name}:[/cyan] Fetching XOS")
-            xos_remote.fetch()
-        except git.exc.GitCommandError as e:
-            console.print(f"[cyan]{project_name}:[/cyan] XOS repo doesn't exist yet (will be created)")
-
-        # Check if shallow and unshallow if needed
-        if GitOperations.is_shallow_repo(project_path):
-            console.print(f"[cyan]{project_name}:[/cyan] Unshallowing repository")
-            if not GitOperations.unshallow_repo(project_path):
-                return SplineResult(project_name, False, "failed to unshallow repository")
+        if not xos_repo_exists:
+            try:
+                update_status("Fetching XOS remote", add_steps=1)
+                xos_remote.fetch()
+                xos_repo_exists = True
+                update_status("Fetched XOS", advance=1)
+            except git.exc.GitCommandError as e:
+                update_status("[dim]XOS repo doesn't exist yet (will be created)[/dim]", persistent=True, advance=1)
 
         # Checkout the upstream revision to target branch
-        console.print(f"[cyan]{project_name}:[/cyan] Checking out {task.upstream_rev} -> {task.target_branch}")
+        update_status(f"Checking out {task.upstream_rev} → {task.target_branch}", add_steps=1)
 
         if task.is_tag:
             # Direct checkout of tag
@@ -220,21 +262,17 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos:
             # Checkout upstream branch
             upstream_ref = f"upstream/{task.upstream_rev}"
             repo.git.checkout(upstream_ref, B=task.target_branch)
+        update_status("Checked out", advance=1)
 
-        # Create repository if needed
+        # Create repository if needed (only for new repos)
         created_repo = False
-        if self.use_create_xos:
-            console.print(f"[cyan]{project_name}:[/cyan] Creating repository (if it doesn't exist)")
-            created_repo = create_xos(project_name)
+        if use_create_xos and not xos_repo_exists:
+            update_status("Creating repository (new repo)", add_steps=1)
+            created_repo = create_xos(task.project.name)
             if not created_repo:
-                console.print(f"[yellow]{project_name}:[/yellow] Skipping - repository creation failed (repo may already exist or tokens missing)")
+                update_status("[yellow]Skipping - repository creation failed[/yellow]", persistent=True, advance=1)
                 return SplineResult(project_name, False, "repository creation failed", was_skipped=True)
-
-        # Check if shallow again after checkout
-        if GitOperations.is_shallow_repo(project_path):
-            console.print(f"[cyan]{project_name}:[/cyan] Unshallowing branch")
-            if not GitOperations.unshallow_repo(project_path):
-                return SplineResult(project_name, False, "failed to unshallow branch")
+            update_status("Created repo", advance=1)
 
         # Handle LFS cleanup if needed
         had_lfs = False
@@ -248,25 +286,28 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos:
 
         if lfsconfig_exists or gitattributes_has_lfs:
             had_lfs = True
-            console.print(f"[cyan]{project_name}:[/cyan] Handling LFS cleanup")
+            update_status("Handling LFS cleanup", add_steps=1)
             lfs_success, lfs_msg = handle_lfs_cleanup(project_path, dry_run=False)  # dry_run is False here since we're in execution mode
             if not lfs_success:
                 # Cleanup repository on LFS failure
                 try:
-                    console.print(f"[yellow]{project_name}:[/yellow] Cleaning up repository after LFS failure")
+                    update_status("[yellow]Cleaning up after LFS failure[/yellow]", persistent=True, advance=1)
                     repo.git.reset("--hard")
                 except Exception:
                     pass  # Ignore cleanup errors
                 return SplineResult(project_name, False, f"spline reticulation succeeded but LFS cleanup failed: {lfs_msg}")
+            update_status("LFS cleaned", advance=1)
 
         # Push to XOS
-        console.print(f"[cyan]{project_name}:[/cyan] Pushing to XOS")
+        update_status(f"Pushing to XOS ({task.target_branch})", add_steps=1)
         push_flags = ["-f"] if task.force_push else []
         try:
             repo.git.push("XOS", f"HEAD:{task.target_branch}", *push_flags)
         except git.exc.GitCommandError as e:
-            console.print(f"[yellow]{project_name}:[/yellow] Push failed - repository may not exist or you may not have permission: {e}")
+            update_status(f"[red]Push failed: {e}[/red]", persistent=True, advance=1)
             return SplineResult(project_name, False, "push failed", was_skipped=True)
+
+        update_status(f"[green]Done - pushed {task.target_branch}[/green]", persistent=True, advance=1)
 
         return SplineResult(
             project_name,
@@ -282,7 +323,7 @@ def perform_single_reticulation(task: SplineTask, dry_run: bool, use_create_xos:
         try:
             if project_path.exists() and (project_path / ".git").exists():
                 repo = git.Repo(project_path)
-                console.print(f"[yellow]{project_name}:[/yellow] Cleaning up repository after failure")
+                update_status(f"[red]Error: {str(e)} - cleaning up[/red]", persistent=True)
                 repo.git.reset("--hard")
         except Exception:
             pass  # Ignore cleanup errors
@@ -348,6 +389,9 @@ class SplineReticulator:
                 upstream_paths = [p.get('path') for p in snippet_root.findall('project[@upstream]')]
                 target_paths.extend(upstream_paths)
 
+            # Always skip manifest - it's the source of upstreams, not a target
+            target_paths = [p for p in target_paths if p != 'manifest']
+
             # Process each target path
             for path in target_paths:
                 # Find project in XOS snippet
@@ -410,6 +454,9 @@ class SplineReticulator:
                         # Clean up revision (only remove refs/heads/ like the original script)
                         if upstream_rev:
                             upstream_rev = upstream_rev.replace('refs/heads/', '')
+                            # Check if this is a tag (AOSP uses refs/tags/ for tags)
+                            if '/tags/' in upstream_rev:
+                                is_tag = True
 
                     if not upstream_rev:
                         console.print(f"[red]Unable to determine AOSP upstream revision for {path}[/red]")
@@ -539,6 +586,12 @@ class SplineReticulator:
         successful_results = []
         failed_results = []
 
+        # Worker status management - thread-safe slot assignment
+        worker_slots_lock = threading.Lock()
+        worker_task_ids: Dict[int, TaskID] = {}  # slot_id -> progress task_id
+        available_slots: List[int] = list(range(self.max_workers))
+        task_to_slot: Dict[int, int] = {}  # future id -> slot_id
+
         # Process with progress bar and threading
         with Progress(
             SpinnerColumn(),
@@ -546,20 +599,102 @@ class SplineReticulator:
             BarColumn(),
             MofNCompleteColumn(),
             TimeElapsedColumn(),
-            console=console
+            console=console,
+            expand=False
         ) as progress:
 
-            spline_task = progress.add_task(
+            main_task = progress.add_task(
                 f"[cyan]Reticulating splines {dry_run_prefix.strip()}",
                 total=len(tasks)
             )
 
+            # Create worker status tasks (initially hidden)
+            for slot_id in range(self.max_workers):
+                task_id = progress.add_task(
+                    f"[dim]  Worker {slot_id}: idle[/dim]",
+                    total=0,
+                    completed=0,
+                    visible=False
+                )
+                worker_task_ids[slot_id] = task_id
+
+            def create_status_callback(spline_task: SplineTask, slot_id: int) -> StatusCallback:
+                """Create a callback that updates the worker's progress task."""
+                project_display = truncate_project_name(spline_task.project.path, max_len=40)
+
+                def callback(status: str, persistent: bool = False, advance: int = 0, add_steps: int = 0):
+                    task_id = worker_task_ids[slot_id]
+
+                    # Update total if adding steps
+                    if add_steps > 0:
+                        current_total = progress.tasks[task_id].total or 0
+                        progress.update(task_id, total=current_total + add_steps)
+
+                    # Advance progress if specified
+                    if advance > 0:
+                        progress.update(task_id, advance=advance)
+
+                    if persistent:
+                        # Print to console so message stays visible
+                        progress.console.print(f"  [cyan]{project_display}:[/cyan] {status}")
+                    else:
+                        # Update the progress task description (transient)
+                        progress.update(
+                            task_id,
+                            description=f"  [cyan]{project_display}:[/cyan] {status}"
+                        )
+
+                return callback
+
+            def run_task_with_status(spline_task: SplineTask) -> SplineResult:
+                """Wrapper that assigns a slot, runs the task, and releases the slot."""
+                # Acquire a slot
+                with worker_slots_lock:
+                    if available_slots:
+                        slot_id = available_slots.pop(0)
+                    else:
+                        # Fallback - shouldn't happen with proper ThreadPoolExecutor sizing
+                        slot_id = 0
+
+                # Make worker task visible and set initial status
+                task_id = worker_task_ids[slot_id]
+                project_display = truncate_project_name(spline_task.project.path, max_len=40)
+                progress.update(
+                    task_id,
+                    description=f"  [cyan]{project_display}:[/cyan] Starting...",
+                    completed=0,
+                    total=0,
+                    visible=True
+                )
+
+                # Create callback for this task
+                status_callback = create_status_callback(spline_task, slot_id)
+
+                try:
+                    # Run the actual reticulation
+                    result = perform_single_reticulation(
+                        spline_task,
+                        self.dry_run,
+                        self.use_create_xos,
+                        status_callback
+                    )
+                    return result
+                finally:
+                    # Hide worker task and release slot
+                    progress.update(
+                        task_id,
+                        description=f"[dim]  Worker {slot_id}: idle[/dim]",
+                        visible=False
+                    )
+                    with worker_slots_lock:
+                        available_slots.append(slot_id)
+
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor_pool:
                 executor = executor_pool
 
-                # Submit all tasks
+                # Submit all tasks with the wrapper
                 futures = {
-                    executor_pool.submit(perform_single_reticulation, task, self.dry_run, self.use_create_xos): task
+                    executor_pool.submit(run_task_with_status, task): task
                     for task in tasks
                 }
 
@@ -578,13 +713,13 @@ class SplineReticulator:
                         else:
                             failed_results.append(result)
 
-                        progress.update(spline_task, advance=1)
+                        progress.update(main_task, advance=1)
 
                     except Exception as e:
                         task = futures[future]
                         failed_result = SplineResult(task.project.path, False, f"exception: {str(e)}")
                         failed_results.append(failed_result)
-                        progress.update(spline_task, advance=1)
+                        progress.update(main_task, advance=1)
 
         return successful_results, failed_results
 

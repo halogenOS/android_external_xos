@@ -441,6 +441,11 @@ def create_xos_repo(repo_name: str) -> bool:
         return True
 
     except Exception as e:
+        error_str = str(e)
+        # Check if repo already exists
+        if "has already been taken" in error_str or "already been taken" in error_str:
+            console.print(f"[cyan]Repository {repo_name} already exists[/cyan]")
+            return True
         console.print(f"[red]Failed to create GitLab repository {repo_name}: {e}[/red]")
         return False
 
@@ -459,8 +464,9 @@ def create_xos(repo_name: str) -> bool:
     # else: GitLab token not available, skipping (expected in some environments)
 
     # Try GitHub
-    if get_github_token():
-        if create_github_repo(repo_name):
+    github_token = get_github_token()
+    if github_token:
+        if create_github_repo(repo_name, github_token):
             created_anywhere = True
     # else: GitHub token not available, skipping (expected in some environments)
 

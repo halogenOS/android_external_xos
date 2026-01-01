@@ -104,7 +104,18 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
             )
 
         # Check if we need to update
-        if current_default == selected_branch:
+        needs_update = False
+        changes = []
+
+        if current_default != selected_branch:
+            needs_update = True
+            changes.append(f'branch: {current_default} → {selected_branch}')
+
+        if full_project.visibility != 'public':
+            needs_update = True
+            changes.append(f'visibility: {full_project.visibility} → public')
+
+        if not needs_update:
             with counter_lock:
                 stats['skipped'] += 1
             pbar.update(1)
@@ -112,13 +123,14 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
                 project_id=project_id,
                 project_name=project_name,
                 status='skipped',
-                message='Already set as default',
+                message='Already set correctly',
                 old_branch=current_default,
                 new_branch=selected_branch
             )
 
-        # Update the default branch
+        # Update the default branch and visibility
         full_project.default_branch = selected_branch
+        full_project.visibility = 'public'
         full_project.save()
 
         with counter_lock:
@@ -129,7 +141,7 @@ def process_project(gl: gitlab.Gitlab, project_id: int, project_name: str, pbar:
             project_id=project_id,
             project_name=project_name,
             status='updated',
-            message=f'Updated from {current_default} to {selected_branch}',
+            message=', '.join(changes),
             old_branch=current_default,
             new_branch=selected_branch
         )
