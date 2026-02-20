@@ -48,6 +48,10 @@ mirrorAll() {
     TOP="$(gettop)" nix run path:"$(gettop)/external/xos/xostools-ng#mirror-all" -- $@
 }
 
+detectRepoResets() {
+    repo forall -c 'line=$(git reflog -1 2>/dev/null); if echo "$line" | grep -q "reset:"; then echo "$REPO_PATH: $(echo "$line" | sed "s/^[a-f0-9]* HEAD@{0}: //")"; fi' 2>/dev/null
+}
+
 generateMissingKeys() {
     TOP="$(gettop)" \
     KEYS_DIR="${KEYS_DIR:=vendor/halogenOS/private/keys}" \
