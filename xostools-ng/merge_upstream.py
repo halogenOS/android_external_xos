@@ -17,6 +17,9 @@ from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
+from rich.live import Live
+from rich.panel import Panel
+from rich.console import Group
 from rich.table import Table
 from dataclasses import dataclass
 import threading
@@ -106,15 +109,146 @@ def parse_upstream_config(upstream_full: str, repo_name: str) -> UpstreamConfig:
 # LFS cleanup function is now imported from xos_common
 
 
-def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
+StatusCallback = Optional[callable]
+
+
+def run_git_with_progress(repo_path: Path, args: list, status_callback: StatusCallback = None) -> Tuple[int, str]:
+    """Run a git command, streaming stderr to status_callback in real-time."""
+    cmd = ['git', '-C', str(repo_path)] + args
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    stderr_lines = []
+
+    def read_stderr():
+        fd = proc.stderr.fileno()
+        buf = ""
+        while True:
+            try:
+                chunk = os.read(fd, 1024)
+                if not chunk:
+                    break
+                text = chunk.decode('utf-8', errors='replace')
+                buf += text
+                # Git uses \r for progress updates and \n for final lines
+                parts = buf.replace('\r', '\n').split('\n')
+                buf = parts[-1]  # Keep incomplete line
+                for part in parts[:-1]:
+                    line = part.strip()
+                    if line:
+                        stderr_lines.append(line)
+                        if status_callback:
+                            status_callback(line)
+            except OSError:
+                break
+        if buf.strip():
+            stderr_lines.append(buf.strip())
+
+    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    stderr_thread.start()
+    proc.wait()
+    stderr_thread.join(timeout=5)
+
+    stdout = proc.stdout.read().decode('utf-8', errors='replace') if proc.stdout else ""
+    return proc.returncode, "\n".join(stderr_lines)
+
+
+SLOW_WORKER_THRESHOLD = 10.0  # seconds before a worker gets its own output box
+
+
+class MergeDisplay:
+    """Rich renderable combining a progress bar with per-project output panels."""
+
+    def __init__(self, total: int, description: str = "[cyan]Merging upstream changes"):
+        self.progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            TimeElapsedColumn(),
+        )
+        self.task_id = self.progress.add_task(description, total=total)
+        self._workers: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+        import time as _time
+        self._time = _time
+
+    def update_worker(self, project_name: str, step: Optional[str], detail: str = ""):
+        with self._lock:
+            if step is None:
+                self._workers.pop(project_name, None)
+            else:
+                existing = self._workers.get(project_name)
+                now = self._time.monotonic()
+                if existing:
+                    existing["step"] = step
+                    existing["detail"] = detail
+                    if detail:
+                        lines = existing.setdefault("output_lines", [])
+                        lines.append(detail)
+                        # Keep last 8 lines of output
+                        if len(lines) > 8:
+                            existing["output_lines"] = lines[-8:]
+                else:
+                    entry: Dict[str, Any] = {"step": step, "detail": detail, "started": now, "output_lines": []}
+                    if detail:
+                        entry["output_lines"].append(detail)
+                    self._workers[project_name] = entry
+
+    def advance(self):
+        self.progress.advance(self.task_id)
+
+    def __rich__(self):
+        now = self._time.monotonic()
+        with self._lock:
+            workers = {k: dict(v) for k, v in self._workers.items()}
+
+        renderables: list = [self.progress]
+
+        for name in sorted(workers):
+            info = workers[name]
+            elapsed = now - info.get("started", now)
+            step = info["step"]
+
+            if elapsed < SLOW_WORKER_THRESHOLD:
+                continue
+
+            elapsed_str = f"{elapsed:.0f}s"
+            output_lines = info.get("output_lines", [])
+            if output_lines:
+                # Show last few lines of git output
+                display_lines = []
+                for line in output_lines[-6:]:
+                    if len(line) > 120:
+                        line = "..." + line[-117:]
+                    display_lines.append(f"[dim]{line}[/dim]")
+                content = "\n".join(display_lines)
+            else:
+                content = f"[dim]{step}...[/dim]"
+
+            title = f"[cyan]{truncate_project_name(name, 50)}[/cyan] [yellow]{step}[/yellow] [dim]({elapsed_str})[/dim]"
+            renderables.append(Panel(content, title=title, border_style="blue", padding=(0, 1)))
+
+        return Group(*renderables)
+
+
+def perform_single_merge(task: MergeTask, dry_run: bool, display: Optional[MergeDisplay] = None) -> MergeResult:
     """Perform merge operation for a single project."""
     project_path = task.project_path
     project_name = task.project.path
+
+    def status(step: str, detail: str = ""):
+        if display:
+            display.update_worker(project_name, step, detail)
+
+    def clear_status():
+        if display:
+            display.update_worker(project_name, None)
 
     if not project_path.exists():
         return MergeResult(project_name, False, "directory not found")
 
     try:
+        status("initializing")
         repo = git.Repo(project_path)
 
         # Set up upstream remote
@@ -167,16 +301,20 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
             )
 
         # Add/update upstream remote
+        status("setting up remote")
         upstream_remote = safe_add_or_update_remote(repo, 'upstream', upstream_url)
 
         # Check if shallow and unshallow if needed
         if GitOperations.is_shallow_repo(project_path):
-            try:
-                repo = git.Repo(project_path)
-                # Unshallow from the XOS remote specifically
-                repo.git.fetch("XOS", "--unshallow")
-            except Exception as e:
-                return MergeResult(project_name, False, f"failed to unshallow repository: {str(e)}")
+            status("unshallowing")
+            rc, stderr = run_git_with_progress(
+                project_path, ['fetch', 'XOS', '--unshallow', '--progress'],
+                lambda line: status("unshallowing", line)
+            )
+            if rc != 0:
+                clear_status()
+                return MergeResult(project_name, False, f"failed to unshallow repository: {stderr}")
+            repo = git.Repo(project_path)
 
         # Ensure we're on the correct branch
         try:
@@ -188,6 +326,7 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
         target_branch = task.short_revision
 
         if current_branch != target_branch:
+            status("checking out branch")
             try:
                 # Try to checkout existing branch
                 repo.git.checkout(target_branch)
@@ -200,26 +339,30 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
                     branch = repo.heads[target_branch]
                     branch.set_tracking_branch(repo.remotes[task.repo_remote].refs[target_branch])
                 except git.exc.GitCommandError as e:
+                    clear_status()
                     return MergeResult(project_name, False, f"failed to checkout branch {target_branch}: {str(e)}")
 
-        # Perform the merge
-        try:
-            # Fetch from upstream
-            upstream_remote = safe_get_remote(repo, 'upstream')
-            if not upstream_remote:
-                return MergeResult(project_name, False, "upstream remote not found")
-            upstream_remote.fetch()
+        # Fetch from upstream
+        status("fetching upstream")
+        rc, stderr = run_git_with_progress(
+            project_path, ['fetch', 'upstream', '--progress'],
+            lambda line: status("fetching upstream", line)
+        )
+        if rc != 0:
+            clear_status()
+            return MergeResult(project_name, False, f"fetch failed: {stderr}")
 
-            # Merge with no-rebase and no-edit (equivalent to --no-rebase --no-edit)
+        # Merge
+        try:
+            status("merging")
             if task.upstream_config.is_tag_or_commit:
-                # Direct reference to tag or commit
                 merge_target = upstream_rev
             else:
-                # Branch reference
                 merge_target = f"upstream/{upstream_rev}"
             repo.git.merge(merge_target, no_edit=True)
 
         except git.exc.GitCommandError as e:
+            clear_status()
             return MergeResult(project_name, False, f"merge failed: {str(e)}")
 
         # Handle LFS cleanup if needed
@@ -234,8 +377,10 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
 
         if lfsconfig_exists or gitattributes_has_lfs:
             had_lfs = True
+            status("cleaning up LFS")
             lfs_success, lfs_msg = handle_lfs_cleanup(project_path, dry_run)
             if not lfs_success:
+                clear_status()
                 return MergeResult(project_name, False, f"merge succeeded but LFS cleanup failed: {lfs_msg}")
 
         # Prepare push command for later execution
@@ -252,6 +397,7 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
             "needs_branch_switch": current_branch != target_branch
         }
 
+        clear_status()
         return MergeResult(
             project_name,
             True,
@@ -263,6 +409,7 @@ def perform_single_merge(task: MergeTask, dry_run: bool) -> MergeResult:
         )
 
     except Exception as e:
+        clear_status()
         return MergeResult(project_name, False, f"unexpected error: {str(e)}")
 
 
@@ -426,31 +573,20 @@ class UpstreamMerger:
         successful_merges = []
         failed_merges = []
 
-        # Process with progress bar and threading
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            console=console
-        ) as progress:
+        display = MergeDisplay(
+            len(tasks),
+            f"[cyan]Merging upstream changes {dry_run_prefix.strip()}"
+        )
 
-            merge_task = progress.add_task(
-                f"[cyan]Merging upstream changes {dry_run_prefix.strip()}",
-                total=len(tasks)
-            )
-
+        with Live(display, refresh_per_second=4, console=console):
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor_pool:
                 executor = executor_pool
 
-                # Submit all tasks
                 futures = {
-                    executor_pool.submit(perform_single_merge, task, self.dry_run): task
+                    executor_pool.submit(perform_single_merge, task, self.dry_run, display): task
                     for task in tasks
                 }
 
-                # Process results as they complete
                 for future in as_completed(futures):
                     if stop_event.is_set():
                         executor_pool.shutdown(wait=False, cancel_futures=True)
@@ -465,13 +601,13 @@ class UpstreamMerger:
                         else:
                             failed_merges.append(result)
 
-                        progress.update(merge_task, advance=1)
+                        display.advance()
 
                     except Exception as e:
                         task = futures[future]
                         failed_result = MergeResult(task.project.path, False, f"exception: {str(e)}")
                         failed_merges.append(failed_result)
-                        progress.update(merge_task, advance=1)
+                        display.advance()
 
         return successful_merges, failed_merges
 
