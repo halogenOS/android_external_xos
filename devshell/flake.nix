@@ -91,6 +91,7 @@
                 libXcursor
                 libxcb
                 libxcb-cursor
+                xcb-util-cursor
                 xcbutilimage
                 xcbutilwm
                 xcbutilkeysyms
