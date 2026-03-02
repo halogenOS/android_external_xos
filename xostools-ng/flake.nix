@@ -246,6 +246,28 @@
           meta.mainProgram = pname;
         };
 
+        # List changes script as a Python application
+        list-changes = python3Packages.buildPythonApplication rec {
+          pname = "list-changes";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = [
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp list_changes.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Branch merger script as a Python application
         merge-branches = python3Packages.buildPythonApplication rec {
           pname = "merge-branches";
@@ -356,6 +378,7 @@
           gitlab-branch-setter = gitlab-branch-setter;
           github-branch-setter = github-branch-setter;
           gitlab-webhook-manager = gitlab-webhook-manager;
+          list-changes = list-changes;
           merge-branches = merge-branches;
           verify-bulletin = verify-bulletin;
         };
@@ -400,6 +423,10 @@
           gitlab-webhook-manager = {
             type = "app";
             program = lib.getExe gitlab-webhook-manager;
+          };
+          list-changes = {
+            type = "app";
+            program = lib.getExe list-changes;
           };
           merge-branches = {
             type = "app";
