@@ -38,16 +38,20 @@ done
 for apex in \
     com.android.adbd com.android.adservices \
     com.android.adservices.api com.android.appsearch \
-    com.android.appsearch.apk \
-    com.android.art com.android.bluetooth \
+    com.android.art com.android.bluetooth com.android.bt \
     com.android.btservices com.android.cellbroadcast \
     com.android.compos com.android.configinfrastructure \
-    com.android.connectivity.resources com.android.conscrypt \
+    com.android.connectivity.resources com.android.conscrypt com.android.crashrecovery \
     com.android.devicelock com.android.extservices \
     com.android.graphics.pdf com.android.hardware.authsecret \
     com.android.hardware.biometrics.face.virtual \
     com.android.hardware.biometrics.fingerprint.virtual \
     com.android.hardware.boot com.android.hardware.cas \
+    com.android.hardware.contexthub com.android.hardware.dumpstate \
+    com.android.hardware.gatekeeper.nonsecure com.android.hardware.power \
+    com.android.hardware.thermal com.android.hardware.threadnetwork \
+    com.android.hardware.uwb com.android.hardware.vibrator com.android.telephonycore \
+    com.android.uprobestats \
     com.android.hardware.neuralnetworks com.android.hardware.rebootescrow \
     com.android.hardware.wifi com.android.healthfitness \
     com.android.hotspot2.osulogin com.android.i18n com.android.ipsec \
