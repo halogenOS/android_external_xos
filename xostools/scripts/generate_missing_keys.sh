@@ -100,16 +100,15 @@ if [ ! -f "$KEYS_DIR/avbkey_4096.pem" ]; then
     openssl ec -in "$KEYS_DIR/avbkey_4096.pem" -pubout -out "$KEYS_DIR/avbkey_4096_pub.pem" || [ -f "$KEYS_DIR/avbkey_4096_pub.pem" ]
 fi
 
-cat <<EOF >> "$KEYS_DIR/keys.mk"
-PRODUCT_DEFAULT_DEV_CERTIFICATE := $KEYS_DIR/releasekey
-PRODUCT_MAINLINE_BLUETOOTH_SEPOLICY_DEV_CERTIFICATES := $KEYS_DIR/
-PRODUCT_EXTRA_RECOVERY_KEYS := \\
+cat <<'EOF' >> "$KEYS_DIR/keys.mk"
+PRODUCT_DEFAULT_DEV_CERTIFICATE := $(KEYS_DIR)/releasekey
+PRODUCT_MAINLINE_BLUETOOTH_SEPOLICY_DEV_CERTIFICATES := $(KEYS_DIR)/
+PRODUCT_EXTRA_RECOVERY_KEYS := \
     build/make/target/product/security/testkey
-PRODUCT_DEFAULT_AVB_KEY := $KEYS_DIR/avbkey_4096.pem
+PRODUCT_DEFAULT_AVB_KEY := $(KEYS_DIR)/avbkey_4096.pem
 EOF
 
 echo >> "$KEYS_DIR/keys.mk"
 
-ln -sf ../../../../build/make/target/product/security/BUILD.bazel "$KEYS_DIR/BUILD.bazel"
 
 echo "Done."

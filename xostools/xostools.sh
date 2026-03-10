@@ -99,6 +99,15 @@ function build() {
         return 0
     fi
 
+    if [ "$buildarg" = "sign" ]; then
+        if [ -z "$TARGET_PRODUCT" ]; then
+            echo "Please run lunch first" >&2
+            return 1
+        fi
+        sign_build
+        return $?
+    fi
+
     # Notify that no target device could be found
     if [ -z "$target" ]; then
         xostools_build_no_target_device
@@ -115,6 +124,11 @@ function build() {
                 eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
+                # When signing post-build, build target-files + otatools
+                # instead of bacon (which would produce a throwaway OTA)
+                if [ "$buildarg" = "full" ] && [ "$module" = "bacon" ] && [[ "$KEYS_DIR" = /* ]]; then
+                    module="target-files-package otatools"
+                fi
                 # Now start building
                 echo "Using $THREAD_COUNT_BUILD threads for build."
                 if [ "$buildarg" != "mm" ]; then
@@ -122,11 +136,13 @@ function build() {
                         echob "Building for SDK phone"
                         [ "${module}" = "bacon" ] && module=''
                     fi
-                    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module
-                    return $?
+                    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module || return $?
                 else
-                    mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module
-                    return $?
+                    mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module || return $?
+                fi
+
+                if [ "$buildarg" = "full" ] && [[ "$KEYS_DIR" = /* ]]; then
+                    sign_build || return $?
                 fi
             ;;
 
@@ -154,6 +170,46 @@ function build() {
         esac
     fi
     return 0
+}
+
+function sign_build() {
+    if [ -z "$KEYS_DIR" ]; then
+        echo "KEYS_DIR is not set" >&2
+        return 1
+    fi
+    if [ ! -f "$KEYS_DIR/releasekey.pk8" ]; then
+        echo "No release keys found in $KEYS_DIR" >&2
+        return 1
+    fi
+
+    local target_files
+    target_files=$(echo "$OUT"/obj/PACKAGING/target_files_intermediates/*-target_files*.zip)
+    if [ ! -f "$target_files" ]; then
+        echo "No target-files zip found in $OUT" >&2
+        echo "Build with: m target-files-package" >&2
+        return 1
+    fi
+
+    local signed_target_files="${OUT}/signed-target_files.zip"
+    local signed_ota="${OUT}/signed-ota.zip"
+
+    local sign_args=(-o -d "$KEYS_DIR")
+    for pk8 in "$KEYS_DIR"/*.certificate.override.pk8; do
+        [ -f "$pk8" ] || continue
+        local cert="$(basename "$pk8" .pk8)"
+        local apex="${cert%.certificate.override}"
+        sign_args+=(--extra_apks "${apex}.apex=$KEYS_DIR/$cert")
+        [ -f "$KEYS_DIR/${cert}.pem" ] && sign_args+=(--extra_apex_payload_key "${apex}.apex=$KEYS_DIR/${cert}.pem")
+    done
+    [ -f "$KEYS_DIR/avbkey_4096.pem" ] && sign_args+=(--avb_vbmeta_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_algorithm SHA256_RSA4096)
+
+    echob "Signing target-files with release keys..."
+    sign_target_files_apks "${sign_args[@]}" "$target_files" "$signed_target_files" || return $?
+
+    echob "Generating signed OTA package..."
+    ota_from_target_files -k "$KEYS_DIR/releasekey" "$signed_target_files" "$signed_ota" || return $?
+
+    echob "Signed OTA: $signed_ota"
 }
 
 function reposync() {

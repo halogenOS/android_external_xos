@@ -22,7 +22,9 @@ cat <<EOF
 Usage: build <target> [lunch target] [module] [noclean]
 
 Targets:
-    full        Full ROM (bacon)
+    full        Full ROM (bacon). If KEYS_DIR is an absolute path,
+                the build is re-signed with release keys post-build.
+    sign        Re-sign the latest build with release keys (requires lunch)
     module      Build only a specific module
     module-list Build multiple modules
     mm          Builds using mmma. Useful for frameworks or modules
