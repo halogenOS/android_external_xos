@@ -191,7 +191,9 @@ function sign_build() {
     fi
 
     local signed_target_files="${OUT}/signed-target_files.zip"
-    local signed_ota="${OUT}/signed-ota.zip"
+    local custom_version
+    custom_version=$(grep -m1 ro.custom.version= "$OUT/product/etc/build.prop" | cut -d= -f2)
+    local signed_ota="${OUT}/${custom_version}.zip"
 
     local sign_args=(-o -d "$KEYS_DIR")
     for pk8 in "$KEYS_DIR"/*.certificate.override.pk8; do
