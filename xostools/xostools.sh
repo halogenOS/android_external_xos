@@ -124,10 +124,11 @@ function build() {
                 eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
-                # When signing post-build, build target-files + otatools
-                # instead of bacon (which would produce a throwaway OTA)
+                # When signing post-build, build only the target-files
+                # directory + otatools (skip zipping the target-files since
+                # sign_build operates directly on the directory).
                 if [ "$buildarg" = "full" ] && [ "$module" = "bacon" ] && [[ "$KEYS_DIR" = /* ]]; then
-                    module="target-files-package otatools"
+                    module="target-files-dir otatools"
                 fi
                 # Now start building
                 echo "Using $THREAD_COUNT_BUILD threads for build."
@@ -182,18 +183,13 @@ function sign_build() {
         return 1
     fi
 
-    local target_files
-    target_files=$(echo "$OUT"/obj/PACKAGING/target_files_intermediates/*-target_files*.zip)
-    if [ ! -f "$target_files" ]; then
-        echo "No target-files zip found in $OUT" >&2
-        echo "Build with: m target-files-package" >&2
+    local target_files_dir
+    target_files_dir=$(echo "$OUT"/obj/PACKAGING/target_files_intermediates/*-target_files)
+    if [ ! -d "$target_files_dir" ]; then
+        echo "No target-files directory found in $OUT" >&2
+        echo "Build with: m target-files-dir" >&2
         return 1
     fi
-
-    local signed_target_files="${OUT}/signed-target_files.zip"
-    local custom_version
-    custom_version=$(grep -m1 ro.custom.version= "$OUT/product/etc/build.prop" | cut -d= -f2)
-    local signed_ota="${OUT}/${custom_version}.zip"
 
     local sign_args=(-o -d "$KEYS_DIR")
     for pk8 in "$KEYS_DIR"/*.certificate.override.pk8; do
@@ -205,11 +201,18 @@ function sign_build() {
     done
     [ -f "$KEYS_DIR/avbkey_4096.pem" ] && sign_args+=(--avb_vbmeta_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_algorithm SHA256_RSA4096)
 
-    echob "Signing target-files with release keys..."
-    sign_target_files_apks "${sign_args[@]}" "$target_files" "$signed_target_files" || return $?
+    echob "Injecting build date..."
+    python3 "$TOP/$CUSTOM_PRODUCT_DIR/build/tools/inject_build_date.py" "$target_files_dir" || return $?
+
+    echob "Signing target-files in-place with release keys..."
+    sign_target_files_apks "${sign_args[@]}" "$target_files_dir" "$target_files_dir" || return $?
+
+    local custom_version
+    custom_version=$(grep -m1 ro.custom.version= "$target_files_dir/PRODUCT/etc/build.prop" | cut -d= -f2)
+    local signed_ota="${OUT}/${custom_version}.zip"
 
     echob "Generating signed OTA package..."
-    ota_from_target_files -k "$KEYS_DIR/releasekey" "$signed_target_files" "$signed_ota" || return $?
+    ota_from_target_files -k "$KEYS_DIR/releasekey" "$target_files_dir" "$signed_ota" || return $?
 
     echob "Signed OTA: $signed_ota"
 }
