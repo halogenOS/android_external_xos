@@ -357,15 +357,13 @@ def find_table_column_indices(headers):
 
 
 def parse_android_versions(versions_text):
-    """Parse Android versions from text like '15, 16' or '13, 14, 15'."""
+    """Parse Android versions from text like '15, 16' or '14, 15, 16, 16-qpr2'."""
     android_versions = []
     if versions_text:
-        # Split by comma and clean up each version
         version_parts = [part.strip() for part in versions_text.split(',')]
         for part in version_parts:
-            # Remove any non-digit characters except for '+'
             clean_part = part.strip()
-            if clean_part.replace('+', '').isdigit():
+            if re.match(r'^\d+(\+|-qpr\d+)?$', clean_part):
                 android_versions.append(clean_part)
     return android_versions
 
@@ -518,7 +516,8 @@ def parse_vulnerability_table(table, current_component, progress_task=None, prog
 
 def fetch_bulletin(date_str):
     """Fetch bulletin HTML for given date (format: YYYY-MM-DD)."""
-    url = f"https://source.android.com/docs/security/bulletin/{date_str}"
+    year = date_str.split('-')[0]
+    url = f"https://source.android.com/docs/security/bulletin/{year}/{date_str}"
 
     console.print(f"[cyan]Fetching bulletin from {url}...[/cyan]")
     try:

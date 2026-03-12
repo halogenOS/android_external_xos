@@ -53,7 +53,8 @@ from xos_common import (
     get_project_path,
     safe_add_or_update_remote,
     check_if_xos_repo_exists,
-    get_xos_target_branch_for_tracked_project
+    get_xos_target_branch_for_tracked_project,
+    setup_tracked_project_branch
 )
 
 from fetch_bulletin import get_bulletin_patches
@@ -285,10 +286,39 @@ def setup_repository(repo, mapping, project_path):
     return aosp_remote
 
 
+def find_remote_for_branch(repo, branch_name):
+    """Find which remote has the given branch."""
+    for remote in repo.remotes:
+        try:
+            remote.fetch(refspec=branch_name)
+            return remote
+        except git.exc.GitCommandError:
+            continue
+    return None
+
+
 def setup_onto_branch(repo, onto, mapping, patch_ref, patch_url):
-    """Setup branch when using --onto parameter."""
+    """Setup branch when using --onto parameter.
+
+    Accepts either 'remote/ref' format or a bare branch name.
+    """
     if '/' not in onto:
-        return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"--onto parameter must be in format 'remote/ref', got: {onto}")
+        # Bare branch name — check if it exists locally first
+        try:
+            repo.git.rev_parse('--verify', onto)
+            return onto, None
+        except git.exc.GitCommandError:
+            pass
+
+        # Not local — find and fetch from upstream
+        remote_obj = find_remote_for_branch(repo, onto)
+        if not remote_obj:
+            project_path = get_android_top() / mapping.local_path
+            success, msg = setup_tracked_project_branch(project_path, mapping.local_path, onto)
+            if success:
+                return onto, None
+            return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"branch '{onto}' not found on any remote; upstream setup failed: {msg}")
+        return onto, None
 
     parts = onto.split('/', 1)
     onto_remote = parts[0]
@@ -332,77 +362,115 @@ def setup_default_branch(repo, mapping, patch_ref, patch_url):
     return None
 
 
-def check_existing_commit(repo, patch_ref, mapping, patch_url):
-    """Check if commit already exists in current branch."""
+def find_upstream_ref(repo, onto_ref, mapping):
+    """Find the upstream remote tracking ref for the given branch."""
     try:
-        repo.git.merge_base('--is-ancestor', patch_ref, 'HEAD')
-        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "patch already applied (skipped)", needs_push=False)
-    except git.exc.GitCommandError:
-        return None
+        tracking = repo.active_branch.tracking_branch()
+        if tracking:
+            return str(tracking)
+    except (TypeError, ValueError):
+        pass
+    for remote_name in ('XOS', 'origin', mapping.remote):
+        try:
+            repo.git.rev_parse('--verify', f'{remote_name}/{onto_ref}')
+            return f'{remote_name}/{onto_ref}'
+        except git.exc.GitCommandError:
+            continue
+    return None
 
 
-def handle_empty_cherry_pick(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url, onto):
-    """Handle empty cherry-pick by creating appropriate commit."""
-    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Empty cherry-pick detected for {patch_ref[:8]}")
-    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: existing_commit: {existing_commit[:8] if existing_commit else 'None'}")
-
+def check_already_handled(repo, patch_ref, mapping, patch_url, onto_ref, cherry_picker):
+    """Check if commit is already handled: exists between upstream..HEAD,
+    or has an [ALREADY APPLIED]/[NO CHANGE] marker commit."""
     original_commit = repo.commit(patch_ref)
     patch_title = original_commit.message.split('\n')[0].strip()
     already_applied_title = f"{ALREADY_APPLIED_PREFIX} {patch_title}"
     no_change_title = f"{NO_CHANGE_PREFIX} {patch_title}"
 
-    commit_already_exists = False
-    if onto:
-        if '/' in onto:
-            onto_remote, onto_ref = onto.split('/', 1)
-        else:
-            onto_ref = onto
-
-        try:
-            commits_in_range = list(repo.iter_commits(f"{onto_ref}..HEAD"))
-            for commit in commits_in_range:
-                commit_title = commit.message.split('\n')[0].strip()
-                if commit_title == already_applied_title or commit_title == no_change_title:
-                    commit_already_exists = True
-                    prefix = ALREADY_APPLIED_PREFIX if commit_title == already_applied_title else NO_CHANGE_PREFIX
-                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: {prefix} commit already exists for {patch_ref[:8]}")
-                    break
-        except git.exc.GitCommandError:
-            pass
-
-    if commit_already_exists:
-        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "commit already exists (skipped)", needs_push=False)
+    # Determine the range to search (upstream..HEAD, or just HEAD if no upstream)
+    upstream_ref = find_upstream_ref(repo, onto_ref, mapping) if onto_ref else None
+    search_range = f"{upstream_ref}..HEAD" if upstream_ref else "HEAD"
 
     try:
+        for commit in repo.iter_commits(search_range, max_count=200):
+            title = commit.message.split('\n')[0].strip()
+            if title == patch_title or title == already_applied_title or title == no_change_title:
+                if cherry_picker:
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: already handled: {title}")
+                return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "commit already exists (skipped)", needs_push=False)
+    except git.exc.GitCommandError:
+        pass
+
+    # Also check exact ancestor
+    try:
+        repo.git.merge_base('--is-ancestor', patch_ref, 'HEAD')
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "patch already applied (skipped)", needs_push=False)
+    except git.exc.GitCommandError:
+        pass
+
+    return None
+
+
+def create_already_applied_commit(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url):
+    """Create an [ALREADY APPLIED] empty commit for a patch found in upstream."""
+    original_commit = repo.commit(patch_ref)
+    patch_title = original_commit.message.split('\n')[0].strip()
+
+    # Abort any in-progress cherry-pick
+    try:
         repo.git.cherry_pick('--abort')
+    except:
+        pass
+    try:
         repo.git.reset('--hard', 'HEAD')
     except:
         pass
 
-    if existing_commit:
-        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Using fuzzy-matched commit: {existing_commit[:8]}")
-        commit_prefix = ALREADY_APPLIED_PREFIX
-        commit_msg = f"{ALREADY_APPLIED_PREFIX} {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
-        success_msg = f"{ALREADY_APPLIED_PREFIX} commit created successfully"
-    else:
-        cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found - using {NO_CHANGE_PREFIX}")
-        commit_prefix = NO_CHANGE_PREFIX
-        commit_msg = f"{NO_CHANGE_PREFIX} {patch_title}\n\nCherry-pick resulted in no changes - commit may no longer be applicable\nCherry-picked from: {patch_ref}"
-        success_msg = f"{NO_CHANGE_PREFIX} commit created successfully"
+    commit_msg = f"{ALREADY_APPLIED_PREFIX} {patch_title}\n\nOriginal commit was already applied in {existing_commit}\nCherry-picked from: {patch_ref}"
+    author_name = original_commit.author.name
+    author_email = original_commit.author.email
+    author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
 
     try:
-        author_name = original_commit.author.name
-        author_email = original_commit.author.email
-        author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
-
         repo.git.commit('--allow-empty', '-m', commit_msg,
                        f'--author={author_name} <{author_email}>',
                        f'--date={author_date}')
-        cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {commit_prefix} commit for {patch_ref[:8]}")
+        if cherry_picker:
+            cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {ALREADY_APPLIED_PREFIX} commit for {patch_ref[:8]}")
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, f"{ALREADY_APPLIED_PREFIX} commit created successfully", needs_push=True)
+    except git.exc.GitCommandError as e:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {ALREADY_APPLIED_PREFIX} commit: {str(e)}")
 
-        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, success_msg, needs_push=True)
-    except git.exc.GitCommandError as commit_error:
-        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {commit_prefix} commit: {str(commit_error)}")
+
+def create_no_change_commit(repo, patch_ref, cherry_picker, mapping, patch_url):
+    """Create a [NO CHANGE] empty commit for a patch that results in no changes."""
+    original_commit = repo.commit(patch_ref)
+    patch_title = original_commit.message.split('\n')[0].strip()
+
+    # Abort any in-progress cherry-pick
+    try:
+        repo.git.cherry_pick('--abort')
+    except:
+        pass
+    try:
+        repo.git.reset('--hard', 'HEAD')
+    except:
+        pass
+
+    commit_msg = f"{NO_CHANGE_PREFIX} {patch_title}\n\nCherry-pick resulted in no changes - commit may no longer be applicable\nCherry-picked from: {patch_ref}"
+    author_name = original_commit.author.name
+    author_email = original_commit.author.email
+    author_date = original_commit.authored_datetime.strftime('%Y-%m-%d %H:%M:%S %z')
+
+    try:
+        repo.git.commit('--allow-empty', '-m', commit_msg,
+                       f'--author={author_name} <{author_email}>',
+                       f'--date={author_date}')
+        if cherry_picker:
+            cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {NO_CHANGE_PREFIX} commit for {patch_ref[:8]}")
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, f"{NO_CHANGE_PREFIX} commit created successfully", needs_push=True)
+    except git.exc.GitCommandError as e:
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {NO_CHANGE_PREFIX} commit: {str(e)}")
 
 
 def handle_cherry_pick_error(error_msg, repo, patch_ref, cherry_picker, mapping, patch_url):
@@ -511,17 +579,21 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 if progress and bucket_task:
                     progress.update(bucket_task, description=f"[green]Cherry-picking {mapping.local_path} ({patch_ref[:12]})")
 
-                existing_commit_result = check_existing_commit(repo, patch_ref, mapping, patch_url)
-                if existing_commit_result:
-                    return existing_commit_result
+                # 1. Check if already handled (exists between upstream..HEAD or [ALREADY APPLIED])
+                already_result = check_already_handled(repo, patch_ref, mapping, patch_url, onto_ref if onto else None, cherry_picker)
+                if already_result:
+                    return already_result
 
-                until_ref = onto_ref if onto else None
-                existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9, until_ref=until_ref)
+                # 2. Check if commit exists in upstream → ALREADY APPLIED (only if we have an upstream ref)
+                upstream_ref = find_upstream_ref(repo, onto_ref, mapping) if onto else None
+                existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9, until_ref=upstream_ref) if upstream_ref else None
                 if existing_commit:
-                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit: {existing_commit[:8]} for {patch_ref[:8]}")
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit in upstream: {existing_commit[:8]} for {patch_ref[:8]}")
+                    return create_already_applied_commit(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url)
                 else:
                     cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
 
+                # 3. Try the cherry-pick
                 try:
                     repo.git.cherry_pick(patch_ref, '--no-edit')
                 except git.exc.GitCommandError as cherry_pick_error:
@@ -529,7 +601,7 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                     is_empty_cherrypick = ("nothing to commit" in error_msg.lower() or "no changes added to commit" in error_msg.lower() or "would result in an empty commit" in error_msg.lower() or "the previous cherry-pick is now empty" in error_msg.lower())
 
                     if is_empty_cherrypick:
-                        return handle_empty_cherry_pick(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url, onto)
+                        return create_no_change_commit(repo, patch_ref, cherry_picker, mapping, patch_url)
                     else:
                         raise cherry_pick_error
 
@@ -598,7 +670,17 @@ class BulletinCherryPicker:
         except git.exc.GitCommandError:
             return self.onto  # Use remote/ref format
 
-    def setup_single_repository_branch(self, repo_path, onto_ref):
+    def find_remote_ref_for_bare_branch(self, repo, branch_name):
+        """Find a remote ref for a bare branch name."""
+        for remote in repo.remotes:
+            try:
+                remote.fetch(refspec=branch_name)
+                return f"{remote.name}/{branch_name}"
+            except git.exc.GitCommandError:
+                continue
+        return None
+
+    def setup_single_repository_branch(self, repo_path, onto_ref, bare_branch=False, mapping=None):
         """Setup branch in a single repository."""
         try:
             import git
@@ -609,13 +691,12 @@ class BulletinCherryPicker:
 
             repo = git.Repo(project_path)
 
+            # Check existing branch first — preserve work from previous runs
             existing_branch = None
             for branch in repo.branches:
                 if branch.name == self.branch_name:
                     existing_branch = branch
                     break
-
-            checkout_ref = self.determine_checkout_ref(repo, onto_ref)
 
             current_branch = None
             try:
@@ -623,18 +704,33 @@ class BulletinCherryPicker:
             except TypeError:
                 pass
 
-            if existing_branch:
-                if self.force_recreate:
-                    if current_branch != self.branch_name:
-                        repo.git.checkout(self.branch_name)
-                    repo.git.reset('--hard', checkout_ref)
-                    self.verbose_print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
+            if existing_branch and not self.force_recreate:
+                if current_branch != self.branch_name:
+                    repo.git.checkout(self.branch_name)
+                    self.verbose_print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
                 else:
-                    if current_branch != self.branch_name:
-                        repo.git.checkout(self.branch_name)
-                        self.verbose_print(f"  [yellow]→[/yellow] Checked out existing {repo_path}:{self.branch_name}")
+                    self.verbose_print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
+                return
+
+            if bare_branch:
+                remote_ref = self.find_remote_ref_for_bare_branch(repo, onto_ref)
+                if not remote_ref:
+                    success, msg = setup_tracked_project_branch(project_path, repo_path, onto_ref)
+                    if success:
+                        self.verbose_print(f"  [green]→[/green] {repo_path}: {msg}")
                     else:
-                        self.verbose_print(f"  [yellow]→[/yellow] Already on {repo_path}:{self.branch_name}")
+                        self.verbose_print(f"  [red]→[/red] {repo_path}: {msg}")
+                    return
+                checkout_ref = remote_ref
+            else:
+                checkout_ref = self.determine_checkout_ref(repo, onto_ref)
+
+            if existing_branch:
+                # force_recreate is True here
+                if current_branch != self.branch_name:
+                    repo.git.checkout(self.branch_name)
+                repo.git.reset('--hard', checkout_ref)
+                self.verbose_print(f"  [yellow]→[/yellow] Reset {repo_path}:{self.branch_name} to {checkout_ref}")
             else:
                 repo.git.checkout('-b', self.branch_name, checkout_ref)
                 self.verbose_print(f"  [yellow]→[/yellow] Created {repo_path}:{self.branch_name} from {checkout_ref}")
@@ -647,10 +743,12 @@ class BulletinCherryPicker:
         if not self.onto or not self.branch_name:
             return
 
-        if '/' not in self.onto:
-            return
+        bare_branch = '/' not in self.onto
+        if bare_branch:
+            onto_ref = self.onto
+        else:
+            onto_remote, onto_ref = self.onto.split('/', 1)
 
-        onto_remote, onto_ref = self.onto.split('/', 1)
         unique_repos = self.get_unique_repos_from_tasks(tasks)
 
         if self.force_recreate:
@@ -658,8 +756,13 @@ class BulletinCherryPicker:
         else:
             console.print(f"[cyan]Setting up branches in {len(unique_repos)} repositories...[/cyan]")
 
+        # Build mapping lookup for bare branch setup
+        mapping_lookup = {}
+        for task in tasks:
+            mapping_lookup[task.project_mapping.local_path] = task.project_mapping
+
         for repo_path in unique_repos:
-            self.setup_single_repository_branch(repo_path, onto_ref)
+            self.setup_single_repository_branch(repo_path, onto_ref, bare_branch=bare_branch, mapping=mapping_lookup.get(repo_path))
 
 
     def run_repo_command(self, command: str) -> bool:
