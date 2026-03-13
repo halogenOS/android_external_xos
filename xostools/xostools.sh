@@ -127,7 +127,7 @@ function build() {
                 # When signing post-build, build only the target-files
                 # directory + otatools (skip zipping the target-files since
                 # sign_build operates directly on the directory).
-                if [ "$buildarg" = "full" ] && [ "$module" = "bacon" ] && [[ "$KEYS_DIR" = /* ]]; then
+                if [ "$buildarg" = "full" ] && [ "$module" = "bacon" ] && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
                     module="target-files-dir otatools"
                 fi
                 # Now start building
@@ -142,7 +142,7 @@ function build() {
                     mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module || return $?
                 fi
 
-                if [ "$buildarg" = "full" ] && [[ "$KEYS_DIR" = /* ]]; then
+                if [ "$buildarg" = "full" ] && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
                     sign_build || return $?
                 fi
             ;;
