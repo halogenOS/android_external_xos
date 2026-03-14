@@ -223,7 +223,7 @@ function emu() {
 
     if [ -z "$target" ]; then
         echo "Usage: emu <target> [skin]"
-        echo "  target: lunch target (e.g. aosp_sdk_phone64_x86_64-bp4a-userdebug)"
+        echo "  target: lunch target (e.g. aosp_sdk_phone_x86_64-bp4a-eng)"
         echo "  skin:   emulator skin resolution (default: 1080x2160)"
         echo ""
         echo "First run builds full images. Subsequent iterations:"
