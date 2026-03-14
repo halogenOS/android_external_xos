@@ -217,6 +217,67 @@ function sign_build() {
     echob "Signed OTA: $signed_ota"
 }
 
+function emu() {
+    local target="$1"
+    local skin="${2:-1080x2160}"
+
+    if [ -z "$target" ]; then
+        echo "Usage: emu <target> [skin]"
+        echo "  target: lunch target (e.g. aosp_sdk_phone64_x86_64-bp4a-userdebug)"
+        echo "  skin:   emulator skin resolution (default: 1080x2160)"
+        echo ""
+        echo "First run builds full images. Subsequent iterations:"
+        echo "  m files && adevice update"
+        return 1
+    fi
+
+    # Lunch dance (same as build full)
+    local device=${target#*_}
+    device=${device%%-*}
+    eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
+
+    # Full build including images (needed for emulator boot) + adevice tools
+    echob "Building (including images for emulator)..."
+    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG || return $?
+
+    # Launch emulator with writable system
+    echob "Launching emulator..."
+    emulator -skin "$skin" -writable-system &
+    local emu_pid=$!
+
+    # Wait for device to boot
+    echob "Waiting for device to boot..."
+    adb wait-for-device
+    while [ "$(adb shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
+        sleep 2
+    done
+    echob "Device booted."
+
+    # Set up overlayfs for writable system
+    adb root
+    adb wait-for-device
+    echob "Setting up remount (this may reboot the device)..."
+    adb remount -R
+    adb wait-for-device
+    while [ "$(adb shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
+        sleep 2
+    done
+    adb root
+    adb wait-for-device
+    adb remount
+
+    # Bootstrap adevice_fingerprint on the device
+    echob "Pushing adevice_fingerprint to device..."
+    adb push "$OUT/system/bin/adevice_fingerprint" /system/bin/adevice_fingerprint
+
+    # Sync build output to device
+    echob "Syncing build to device..."
+    adevice update
+
+    echob "Emulator ready. PID: $emu_pid"
+    echob "For subsequent iterations: m files && adevice update"
+}
+
 function reposync() {
     repo sync --force-sync -c --no-clone-bundle --no-tags $@
     return $?
