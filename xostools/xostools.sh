@@ -208,7 +208,9 @@ function sign_build() {
     sign_target_files_apks "${sign_args[@]}" "$target_files_dir" "$target_files_dir" || return $?
 
     local custom_version
-    custom_version=$(grep -m1 ro.custom.version= "$target_files_dir/PRODUCT/etc/build.prop" | cut -d= -f2)
+    local product_build_prop="$target_files_dir/PRODUCT/etc/build.prop"
+    [ -f "$product_build_prop" ] || product_build_prop="$target_files_dir/SYSTEM/product/etc/build.prop"
+    custom_version=$(grep -m1 ro.custom.version= "$product_build_prop" | cut -d= -f2)
     local signed_ota="${OUT}/${custom_version}.zip"
 
     echob "Generating signed OTA package..."
