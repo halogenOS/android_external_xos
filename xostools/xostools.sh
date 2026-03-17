@@ -247,34 +247,44 @@ function emu() {
     emulator -skin "$skin" -writable-system &
     local emu_pid=$!
 
+    # Find the emulator serial
+    echob "Waiting for emulator to appear..."
+    local emu_serial=""
+    while [ -z "$emu_serial" ]; do
+        emu_serial=$(adb devices | grep -o 'emulator-[0-9]*' | head -1)
+        sleep 1
+    done
+    local adb="adb -s $emu_serial"
+    echob "Found emulator: $emu_serial"
+
     # Wait for device to boot
     echob "Waiting for device to boot..."
-    adb wait-for-device
-    while [ "$(adb shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
+    $adb wait-for-device
+    while [ "$($adb shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
         sleep 2
     done
     echob "Device booted."
 
     # Set up overlayfs for writable system
-    adb root
-    adb wait-for-device
+    $adb root
+    $adb wait-for-device
     echob "Setting up remount (this may reboot the device)..."
-    adb remount -R
-    adb wait-for-device
-    while [ "$(adb shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
+    $adb remount -R
+    $adb wait-for-device
+    while [ "$($adb shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
         sleep 2
     done
-    adb root
-    adb wait-for-device
-    adb remount
+    $adb root
+    $adb wait-for-device
+    $adb remount
 
     # Bootstrap adevice_fingerprint on the device
     echob "Pushing adevice_fingerprint to device..."
-    adb push "$OUT/system/bin/adevice_fingerprint" /system/bin/adevice_fingerprint
+    $adb push "$OUT/system/bin/adevice_fingerprint" /system/bin/adevice_fingerprint
 
     # Sync build output to device
     echob "Syncing build to device..."
-    adevice update
+    ANDROID_SERIAL=$emu_serial adevice update
 
     echob "Emulator ready. PID: $emu_pid"
     echob "For subsequent iterations: m files && adevice update"
