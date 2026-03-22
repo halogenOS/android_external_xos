@@ -216,6 +216,11 @@ function sign_build() {
     echob "Generating signed OTA package..."
     ota_from_target_files -k "$KEYS_DIR/releasekey" "$target_files_dir" "$signed_ota" || return $?
 
+    if [ -f "$KEYS_DIR/avbkey_4096.pem" ]; then
+        echob "Extracting AVB public key..."
+        avbtool extract_public_key --key "$KEYS_DIR/avbkey_4096.pem" --output "${OUT}/pkmd.bin"
+    fi
+
     echob "Signed OTA: $signed_ota"
 }
 
