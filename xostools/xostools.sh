@@ -199,7 +199,14 @@ function sign_build() {
         sign_args+=(--extra_apks "${apex}.apex=$KEYS_DIR/$cert")
         [ -f "$KEYS_DIR/${cert}.pem" ] && sign_args+=(--extra_apex_payload_key "${apex}.apex=$KEYS_DIR/${cert}.pem")
     done
-    [ -f "$KEYS_DIR/avbkey_4096.pem" ] && sign_args+=(--avb_vbmeta_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_algorithm SHA256_RSA4096)
+    if [ -f "$KEYS_DIR/avbkey_4096.pem" ]; then
+        sign_args+=(
+            --avb_vbmeta_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_algorithm SHA256_RSA4096
+            --avb_vbmeta_system_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_system_algorithm SHA256_RSA4096
+            --avb_vbmeta_vendor_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_vendor_algorithm SHA256_RSA4096
+            --avb_recovery_key "$KEYS_DIR/avbkey_4096.pem" --avb_recovery_algorithm SHA256_RSA4096
+        )
+    fi
 
     echob "Injecting build date..."
     python3 "$TOP/$CUSTOM_PRODUCT_DIR/build/tools/inject_build_date.py" "$target_files_dir" || return $?
