@@ -93,12 +93,12 @@ rm -f "$KEYS_DIR/make_key"
 
 echo >> "$KEYS_DIR/keys.mk"
 
-if [ ! -f "$KEYS_DIR/avbkey_4096.pem" ]; then
-    echo "Generating AVB key"
-    "$KEYS_DIR/make_key" "$KEYS_DIR/avbkey_4096" "$KEYS_SUBJECT"
-    openssl pkcs8 -in "$KEYS_DIR/avbkey_4096.pk8" -inform DER -nocrypt -out "$KEYS_DIR/avbkey_4096.pem" || [ -f "$KEYS_DIR/avbkey_4096.pem" ]
-    openssl ec -in "$KEYS_DIR/avbkey_4096.pem" -pubout -out "$KEYS_DIR/avbkey_4096_pub.pem" || [ -f "$KEYS_DIR/avbkey_4096_pub.pem" ]
-fi
+for size in 2048 4096; do
+    if [ ! -f "$KEYS_DIR/avbkey_${size}.pem" ]; then
+        echo "Generating AVB key (RSA $size)"
+        openssl genrsa -out "$KEYS_DIR/avbkey_${size}.pem" "$size"
+    fi
+done
 
 cat <<'EOF' >> "$KEYS_DIR/keys.mk"
 PRODUCT_DEFAULT_DEV_CERTIFICATE := $(KEYS_DIR)/releasekey

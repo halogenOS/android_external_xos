@@ -199,14 +199,20 @@ function sign_build() {
         sign_args+=(--extra_apks "${apex}.apex=$KEYS_DIR/$cert")
         [ -f "$KEYS_DIR/${cert}.pem" ] && sign_args+=(--extra_apex_payload_key "${apex}.apex=$KEYS_DIR/${cert}.pem")
     done
-    if [ -f "$KEYS_DIR/avbkey_4096.pem" ]; then
-        sign_args+=(
-            --avb_vbmeta_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_algorithm SHA256_RSA4096
-            --avb_vbmeta_system_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_system_algorithm SHA256_RSA4096
-            --avb_vbmeta_vendor_key "$KEYS_DIR/avbkey_4096.pem" --avb_vbmeta_vendor_algorithm SHA256_RSA4096
-            --avb_recovery_key "$KEYS_DIR/avbkey_4096.pem" --avb_recovery_algorithm SHA256_RSA4096
-        )
-    fi
+    local misc_info="$target_files_dir/META/misc_info.txt"
+    local avb_partitions=(
+        boot init_boot dtbo product recovery system system_dlkm system_ext
+        system_other odm odm_dlkm pvmfw vendor vendor_boot vendor_kernel_boot
+        vendor_dlkm vbmeta vbmeta_system vbmeta_vendor
+    )
+    for part in "${avb_partitions[@]}"; do
+        local algo=$(grep "^avb_${part}_algorithm=" "$misc_info" 2>/dev/null | cut -d= -f2)
+        [ -z "$algo" ] && continue
+        local key_size="${algo##*RSA}"
+        local avb_key="$KEYS_DIR/avbkey_${key_size}.pem"
+        [ -f "$avb_key" ] || continue
+        sign_args+=(--avb_${part}_key "$avb_key" --avb_${part}_algorithm "$algo")
+    done
 
     echob "Injecting build date..."
     python3 "$TOP/$CUSTOM_PRODUCT_DIR/build/tools/inject_build_date.py" "$target_files_dir" || return $?
