@@ -154,23 +154,306 @@ def process_single_task_safely(task, dry_run, cherry_picker, progress, bucket_ta
         return create_failed_result_from_exception(task, e)
 
 
+# Bracketed prefixes Google leaves on the subject line of merge/backport variants.
+# Stripped before comparing subjects so the same fix matches across versions.
+_SUBJECT_PREFIX_RE = re.compile(
+    r'^\s*(\[[^\]]+\]\s*)+'  # one or more [BRACKETED] tags at the start
+)
+
+
+def normalize_subject(title):
+    """Strip leading [DO NOT MERGE]-style tags and surrounding whitespace so the
+    same logical fix compares equal across its per-release variants."""
+    if not title:
+        return ""
+    return _SUBJECT_PREFIX_RE.sub('', title).strip().lower()
+
+
+def _task_identity(task):
+    """Return (normalized_subject, change_ids frozenset, bugs frozenset) for a task."""
+    info = task.patch_info
+    meta = info.get('metadata') or {}
+
+    def _as_set(value):
+        if value is None:
+            return frozenset()
+        if isinstance(value, list):
+            return frozenset(v.strip() for v in value if v and v.strip())
+        return frozenset([value.strip()]) if value.strip() else frozenset()
+
+    subject = normalize_subject(info.get('title'))
+    return subject, _as_set(meta.get('Change-Id')), _as_set(meta.get('Bug'))
+
+
+def _are_variants(a, b):
+    """Two tasks are variants of one logical fix when their normalized subjects
+    match AND they share a Change-Id or a Bug. Same ref trivially qualifies."""
+    if a.patch_info['ref'] == b.patch_info['ref']:
+        return True
+    subj_a, cid_a, bug_a = _task_identity(a)
+    subj_b, cid_b, bug_b = _task_identity(b)
+    if not subj_a or subj_a != subj_b:
+        return False
+    return bool(cid_a & cid_b) or bool(bug_a & bug_b)
+
+
+def group_variant_tasks(repo_tasks):
+    """Collapse tasks that are variants of the same fix into groups.
+
+    Returns a list of groups (each a list of tasks) preserving first-seen order
+    of groups and of members within a group. Transitive: A~B and B~C puts all
+    three together even if A and C don't directly share an id.
+    """
+    groups = []  # list of lists of tasks
+    seen_refs = set()
+    for task in repo_tasks:
+        ref = task.patch_info['ref']
+        if ref in seen_refs:
+            continue  # exact-SHA duplicate already collected
+        seen_refs.add(ref)
+        for group in groups:
+            if any(_are_variants(task, member) for member in group):
+                group.append(task)
+                break
+        else:
+            groups.append([task])
+    return groups
+
+
+def _committer_datetime(repo, task):
+    """Committer date of a task's commit, or datetime.max if unresolvable so it
+    sorts last (we prefer trying the oldest, well-resolved variant first)."""
+    try:
+        return repo.commit(task.patch_info['ref']).committed_datetime
+    except Exception:
+        from datetime import datetime, timezone
+        return datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _resolve_task_commits(repo, repo_tasks):
+    """Resolve each task's patch ref to a commit, preserving task association.
+
+    Returns a list of (task, commit) for refs that resolve, and a boolean that
+    is True only when every ref resolved. A single unresolved ref makes the
+    lineage sort unsafe (we'd reorder against an incomplete graph), so callers
+    fall back to the original order in that case.
+    """
+    resolved = []
+    for task in repo_tasks:
+        ref = task.patch_info['ref']
+        try:
+            resolved.append((task, repo.commit(ref)))
+        except Exception:
+            return resolved, False
+    return resolved, True
+
+
+def _is_ancestor(repo, ancestor, descendant):
+    """True if `ancestor` is an ancestor of `descendant` (same commit counts)."""
+    if ancestor.hexsha == descendant.hexsha:
+        return True
+    try:
+        return repo.is_ancestor(ancestor, descendant)
+    except Exception:
+        return False
+
+
+def order_tasks_by_lineage(repo, repo_tasks):
+    """Order a repo's cherry-pick tasks so dependencies apply before dependents.
+
+    Commits are grouped into lineages (chains related by ancestry), each lineage
+    is ordered oldest-ancestor-first, and the lineages themselves are ordered by
+    the author date of their tip (youngest) commit. Unrelated commits each form
+    their own single-commit lineage. Falls back to the original order if any ref
+    cannot be resolved against the local graph.
+    """
+    if len(repo_tasks) < 2:
+        return repo_tasks
+
+    resolved, complete = _resolve_task_commits(repo, repo_tasks)
+    if not complete:
+        return repo_tasks
+
+    # 1. Assign each commit to a lineage: join the first lineage it shares an
+    #    ancestry relation with, otherwise start a new one.
+    lineages = []  # list of lists of (task, commit)
+    for task, commit in resolved:
+        for lineage in lineages:
+            if any(_is_ancestor(repo, commit, other) or _is_ancestor(repo, other, commit)
+                   for _, other in lineage):
+                lineage.append((task, commit))
+                break
+        else:
+            lineages.append([(task, commit)])
+
+    # 2. Within each lineage, ancestors come before descendants. The number of
+    #    in-lineage ancestors gives a topological rank; commits that are
+    #    incomparable by ancestry (siblings that both feed a later commit) share
+    #    a rank and are tie-broken by author date to match upstream sequencing.
+    def _topo_key(repo, lineage):
+        commits = [c for _, c in lineage]
+        return lambda pair: (
+            sum(1 for other in commits
+                if other.hexsha != pair[1].hexsha and _is_ancestor(repo, other, pair[1])),
+            pair[1].authored_datetime,
+        )
+
+    for lineage in lineages:
+        lineage.sort(key=_topo_key(repo, lineage))
+
+    # 3. Order lineages by the author date of their tip (last) commit.
+    lineages.sort(key=lambda lineage: lineage[-1][1].authored_datetime)
+
+    # 4. Concatenate.
+    return [task for lineage in lineages for task, _ in lineage]
+
+
+def order_groups_by_lineage(repo, groups):
+    """Order variant-groups so dependencies apply before dependents.
+
+    Each group is first ordered internally by committer date (oldest first — the
+    variant we try first). The groups are then placed by lineage using each
+    group's oldest member as its representative, reusing the same lineage logic
+    as individual commits. Falls back to input order if refs don't resolve.
+    """
+    # Order members within each group: oldest committer date first.
+    for group in groups:
+        group.sort(key=lambda t: _committer_datetime(repo, t))
+
+    if len(groups) < 2:
+        return groups
+
+    representatives = [group[0] for group in groups]
+    ordered_reps = order_tasks_by_lineage(repo, representatives)
+
+    # order_tasks_by_lineage falls back to input order on unresolved refs; in
+    # that case ordered_reps is `representatives` unchanged and this is a no-op.
+    rep_to_group = {id(group[0]): group for group in groups}
+    return [rep_to_group[id(rep)] for rep in ordered_reps]
+
+
+def prepare_repo_bucket_groups(repo_path, repo_tasks, dry_run, cherry_picker):
+    """Group variants and order the bucket by commit lineage.
+
+    Returns a list of groups (each a list of variant tasks). The fetch mirrors
+    what each cherry-pick would do anyway, hoisted so the whole bucket's refs are
+    present before grouping/ordering. Any failure falls back to one group per
+    task in the original order.
+    """
+    singleton_groups = [[t] for t in repo_tasks]
+
+    if dry_run or len(repo_tasks) < 2:
+        return singleton_groups
+
+    try:
+        project_path = get_android_top() / repo_path
+        repo = git.Repo(project_path)
+        aosp_remote = safe_get_remote(repo, 'aosp')
+        if aosp_remote is None:
+            return singleton_groups
+        aosp_remote.fetch()
+
+        groups = group_variant_tasks(repo_tasks)
+        groups = order_groups_by_lineage(repo, groups)
+
+        if cherry_picker:
+            collapsed = sum(len(g) - 1 for g in groups)
+            if collapsed:
+                cherry_picker.verbose_print(
+                    f"  [cyan]→[/cyan] {repo_path}: grouped {len(repo_tasks)} patches into "
+                    f"{len(groups)} fix(es) ({collapsed} variant(s) to try as fallback)"
+                )
+        return groups
+    except Exception as e:
+        if cherry_picker:
+            cherry_picker.verbose_print(f"  [yellow]→[/yellow] {repo_path}: grouping/lineage skipped ({e})")
+        return singleton_groups
+
+
+def _variant_skip_result(mapping, skipped_task, applied_task):
+    """Result row for a variant we never tried because a sibling already applied."""
+    applied_ref = applied_task.patch_info['ref'][:12]
+    title = skipped_task.patch_info.get('title', '')
+    return CherryPickResult(
+        mapping.local_path,
+        skipped_task.patch_info['ref'],
+        skipped_task.patch_info['url'],
+        True,
+        f"skipped variant (same fix as {applied_ref} already applied): {title}",
+    )
+
+
+def apply_variant_group(group, dry_run, cherry_picker, progress, bucket_task):
+    """Try a group's variants oldest-first; first success wins.
+
+    Returns a list of results — one for the applied/failed variant plus a
+    skipped row per untried sibling. On total failure the first-listed variant
+    is re-picked so the repo is left in that variant's conflict state, then its
+    failure is reported as usual.
+    """
+    mapping = group[0].project_mapping
+
+    # Single-variant groups: behave exactly as before.
+    if len(group) == 1:
+        return [process_single_task_safely(group[0], dry_run, cherry_picker, progress, bucket_task)]
+
+    results = []
+    for task in group:
+        result = process_single_task_safely(task, dry_run, cherry_picker, progress, bucket_task)
+        if result.success:
+            results.append(result)
+            for other in group:
+                if other is not task:
+                    results.append(_variant_skip_result(mapping, other, task))
+            return results
+        # This variant failed; clear the in-progress cherry-pick AND the repo's
+        # conflict flag, otherwise check_conflict_state would short-circuit the
+        # next sibling before it is even attempted.
+        if not dry_run:
+            _abort_inflight_cherry_pick(mapping, cherry_picker)
+
+    # No variant applied. Re-pick the first-listed variant so the repo is left in
+    # its conflict state for manual resolution, and report that failure.
+    first = group[0]
+    final = process_single_task_safely(first, dry_run, cherry_picker, progress, bucket_task)
+    results.append(final)
+    return results
+
+
+def _abort_inflight_cherry_pick(mapping, cherry_picker=None):
+    """Abort an in-progress cherry-pick and clear the repo's conflict flag so the
+    next variant starts clean."""
+    project_path = get_android_top() / mapping.local_path
+    try:
+        repo = git.Repo(project_path)
+        if (project_path / ".git" / "CHERRY_PICK_HEAD").exists():
+            repo.git.cherry_pick('--abort')
+    except Exception:
+        pass
+    if cherry_picker:
+        with cherry_picker.conflict_lock:
+            cherry_picker.conflicted_repos.discard(mapping.local_path)
+
+
 def process_repo_bucket(repo_path, repo_tasks, dry_run, cherry_picker, progress, pick_task, stop_event):
     """Process all tasks for a single repository sequentially."""
+    groups = prepare_repo_bucket_groups(repo_path, repo_tasks, dry_run, cherry_picker)
+
     bucket_task = progress.add_task(
         f"[dim]Starting {repo_path}...",
         total=len(repo_tasks)
     )
 
     bucket_results = []
-    for i, task in enumerate(repo_tasks):
+    for group in groups:
         if stop_event.is_set():
             break
 
-        result = process_single_task_safely(task, dry_run, cherry_picker, progress, bucket_task)
-        bucket_results.append(result)
+        group_results = apply_variant_group(group, dry_run, cherry_picker, progress, bucket_task)
+        bucket_results.extend(group_results)
 
-        progress.update(pick_task, advance=1)
-        progress.update(bucket_task, advance=1)
+        progress.update(pick_task, advance=len(group))
+        progress.update(bucket_task, advance=len(group))
 
     progress.remove_task(bucket_task)
     return bucket_results
@@ -338,27 +621,50 @@ def setup_onto_branch(repo, onto, mapping, patch_ref, patch_url):
         return None, CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to fetch from remote '{onto_remote}': {str(e)}")
 
 
-def setup_default_branch(repo, mapping, patch_ref, patch_url):
-    """Setup default branch checkout."""
+def _head_contains(repo, target):
+    """True if HEAD already includes `target` (HEAD == target or target is an
+    ancestor of HEAD). Used to avoid re-checking-out the base ref once picks
+    have been stacked on top of it — a re-checkout would discard them."""
     try:
-        current_branch = repo.active_branch.name
-    except TypeError:
-        current_branch = None
+        target_commit = repo.commit(target)
+    except Exception:
+        return False
+    head = repo.head.commit
+    if head.hexsha == target_commit.hexsha:
+        return True
+    try:
+        return repo.is_ancestor(target_commit, head)
+    except Exception:
+        return False
 
+
+def setup_default_branch(repo, mapping, patch_ref, patch_url):
+    """Position the repo on its working ref before a cherry-pick.
+
+    The manifest revision for merge-aosp projects is the AOSP base (e.g.
+    refs/tags/android-16.0.0_r4). The first task in a bucket checks it out; once
+    earlier picks are stacked on top, HEAD becomes a descendant of that base, so
+    later tasks must NOT re-checkout it (that would throw the picks away). The
+    descendant guard makes this function idempotent across a bucket.
+    """
     target_branch = mapping.revision
 
-    if current_branch != target_branch:
+    # Already on the target, or building on top of it — leave HEAD alone so
+    # accumulated cherry-picks in this bucket survive.
+    if _head_contains(repo, target_branch):
+        return None
+
+    try:
+        repo.git.checkout(target_branch)
+    except git.exc.GitCommandError:
         try:
-            repo.git.checkout(target_branch)
-        except git.exc.GitCommandError:
-            try:
-                remote_ref = f"{mapping.remote}/{target_branch}"
-                repo.git.fetch(mapping.remote)
-                repo.git.checkout('-b', target_branch, remote_ref)
-                branch = repo.heads[target_branch]
-                branch.set_tracking_branch(repo.remotes[mapping.remote].refs[target_branch])
-            except git.exc.GitCommandError as e:
-                return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout branch {target_branch}: {str(e)}")
+            remote_ref = f"{mapping.remote}/{target_branch}"
+            repo.git.fetch(mapping.remote)
+            repo.git.checkout('-b', target_branch, remote_ref)
+            branch = repo.heads[target_branch]
+            branch.set_tracking_branch(repo.remotes[mapping.remote].refs[target_branch])
+        except git.exc.GitCommandError as e:
+            return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to checkout branch {target_branch}: {str(e)}")
     return None
 
 
