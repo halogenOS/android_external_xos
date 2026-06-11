@@ -197,6 +197,70 @@ def _are_variants(a, b):
     return bool(cid_a & cid_b) or bool(bug_a & bug_b)
 
 
+# Commit-message trailers carry the identity that survives re-cherry-picking
+# across release branches, even when surrounding text and other trailers drift.
+_CHANGE_ID_RE = re.compile(r'^\s*Change-Id:\s*(\S+)', re.MULTILINE)
+_BUG_RE = re.compile(r'^\s*Bug:\s*(\S+)', re.MULTILINE)
+
+
+def _message_identity(message):
+    """Return (normalized_subject, change_ids frozenset, bugs frozenset) parsed
+    from a raw commit message — the message-level counterpart to _task_identity,
+    for comparing arbitrary history commits against a patch."""
+    lines = message.strip().split('\n')
+    subject = normalize_subject(lines[0] if lines else "")
+    change_ids = frozenset(_CHANGE_ID_RE.findall(message))
+    bugs = frozenset(_BUG_RE.findall(message))
+    return subject, change_ids, bugs
+
+
+def _messages_are_variants(a_message, b_message):
+    """Two commit messages describe the same logical fix when their normalized
+    subjects match AND they share a Change-Id or a Bug. Robust to divergent
+    cherry-pick/Merged-In trailers that defeat whole-message fuzzy matching."""
+    subj_a, cid_a, bug_a = _message_identity(a_message)
+    subj_b, cid_b, bug_b = _message_identity(b_message)
+    if not subj_a or subj_a != subj_b:
+        return False
+    return bool(cid_a & cid_b) or bool(bug_a & bug_b)
+
+
+def find_already_applied_in_base(repo, patch_ref, base_ref):
+    """Find a commit in base_ref's history that is the same logical fix as
+    patch_ref, matched by normalized subject + shared Change-Id/Bug.
+
+    This is the record-keeping detector: a bulletin patch whose fix Google had
+    already rolled into the AOSP base tag (or upstream branch) we forked from.
+    The author-date window keeps the walk cheap; we look both slightly before and
+    after the patch date because a base-contained original predates its later
+    bulletin re-spin, while a forward cherry-pick follows it.
+    """
+    try:
+        patch_message = repo.commit(patch_ref).message
+    except Exception:
+        return None
+    subject, change_ids, bugs = _message_identity(patch_message)
+    if not subject or (not change_ids and not bugs):
+        return None  # without a subject and an id/bug, matching is unreliable
+
+    try:
+        lines = repo.git.log('--format=%H', base_ref).strip().split('\n')
+    except git.exc.GitCommandError:
+        return None
+
+    short = patch_ref[:7]
+    for sha in lines:
+        if not sha or sha.startswith(short):
+            continue
+        try:
+            candidate = repo.commit(sha)
+        except Exception:
+            continue
+        if _messages_are_variants(patch_message, candidate.message):
+            return sha
+    return None
+
+
 def group_variant_tasks(repo_tasks):
     """Collapse tasks that are variants of the same fix into groups.
 
@@ -685,32 +749,68 @@ def find_upstream_ref(repo, onto_ref, mapping):
     return None
 
 
+def resolve_history_base(repo, onto_ref, mapping):
+    """Resolve the base ref that bounds this branch's XOS-specific history.
+
+    In --onto mode the bound is the upstream tracking ref. In non-onto mode the
+    branch is a merge-aosp fork sitting on an AOSP release tag (e.g.
+    android-16.0.0_r4); commits between that tag and HEAD are the XOS additions
+    we want to scan. The base is derived from the repo's own history — the latest
+    android-* tag reachable from HEAD — rather than from the manifest revision,
+    which for merge-aosp projects often defaults to the branch name (XOS-16.2)
+    and would resolve to HEAD itself, leaving an empty base..HEAD range. Deriving
+    it from tags also handles untracked repos the manifest doesn't describe.
+    """
+    if onto_ref:
+        return find_upstream_ref(repo, onto_ref, mapping)
+    try:
+        tag = repo.git.describe('--tags', '--abbrev=0', '--match', 'android-*', 'HEAD').strip()
+        return tag or None
+    except git.exc.GitCommandError:
+        return None
+
+
 def check_already_handled(repo, patch_ref, mapping, patch_url, onto_ref, cherry_picker):
-    """Check if commit is already handled: exists between upstream..HEAD,
-    or has an [ALREADY APPLIED]/[NO CHANGE] marker commit."""
-    original_commit = repo.commit(patch_ref)
-    patch_title = original_commit.message.split('\n')[0].strip()
+    """Skip (creating nothing) when this patch is already handled in base..HEAD.
+
+    "Handled" means one of, all confined to the XOS commits we put on top of the
+    base — never the base itself:
+      * the same logical fix is already present (real pick or one we added),
+        matched by identity (normalized subject + shared Change-Id/Bug) so a
+        reworded title still counts; or
+      * we previously recorded an [ALREADY APPLIED]/[NO CHANGE] marker for it.
+
+    This is the idempotency guard: it prevents a re-run from stacking a second
+    marker on top of a fix or marker that is already in our history.
+    """
+    patch_message = repo.commit(patch_ref).message
+    patch_title = patch_message.split('\n')[0].strip()
     already_applied_title = f"{ALREADY_APPLIED_PREFIX} {patch_title}"
     no_change_title = f"{NO_CHANGE_PREFIX} {patch_title}"
 
-    # Determine the range to search (upstream..HEAD, or just HEAD if no upstream)
-    upstream_ref = find_upstream_ref(repo, onto_ref, mapping) if onto_ref else None
-    search_range = f"{upstream_ref}..HEAD" if upstream_ref else "HEAD"
+    # Scan the branch's own history (base..HEAD) to completion. When the base is
+    # resolvable the range is bounded to XOS commits, so no count cap is needed;
+    # only fall back to a capped bare-HEAD walk when no base can be determined.
+    base_ref = resolve_history_base(repo, onto_ref, mapping)
+    if base_ref:
+        search_range = f"{base_ref}..HEAD"
+        iter_kwargs = {}
+    else:
+        search_range = "HEAD"
+        iter_kwargs = {"max_count": 200}
 
     try:
-        for commit in repo.iter_commits(search_range, max_count=200):
+        for commit in repo.iter_commits(search_range, **iter_kwargs):
             title = commit.message.split('\n')[0].strip()
-            if title == patch_title or title == already_applied_title or title == no_change_title:
-                if cherry_picker:
-                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: already handled: {title}")
-                return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "commit already exists (skipped)", needs_push=False)
-    except git.exc.GitCommandError:
-        pass
-
-    # Also check exact ancestor
-    try:
-        repo.git.merge_base('--is-ancestor', patch_ref, 'HEAD')
-        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, "patch already applied (skipped)", needs_push=False)
+            if title == already_applied_title or title == no_change_title:
+                message = f"skipped: marker already present ({commit.hexsha[:8]})"
+            elif _messages_are_variants(patch_message, commit.message):
+                message = f"skipped: same fix already in branch ({commit.hexsha[:8]})"
+            else:
+                continue
+            if cherry_picker:
+                cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: already handled: {title}")
+            return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, message, needs_push=False)
     except git.exc.GitCommandError:
         pass
 
@@ -743,7 +843,7 @@ def create_already_applied_commit(repo, patch_ref, existing_commit, cherry_picke
                        f'--date={author_date}')
         if cherry_picker:
             cherry_picker.verbose_print(f"  [green]→[/green] {mapping.local_path}: Created {ALREADY_APPLIED_PREFIX} commit for {patch_ref[:8]}")
-        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, f"{ALREADY_APPLIED_PREFIX} commit created successfully", needs_push=True)
+        return CherryPickResult(mapping.local_path, patch_ref, patch_url, True, f"{ALREADY_APPLIED_PREFIX} created (fix in base {existing_commit[:8]})", needs_push=True)
     except git.exc.GitCommandError as e:
         return CherryPickResult(mapping.local_path, patch_ref, patch_url, False, f"failed to create {ALREADY_APPLIED_PREFIX} commit: {str(e)}")
 
@@ -818,13 +918,37 @@ def handle_lfs_cleanup_if_needed(project_path, mapping, patch_ref, patch_url, dr
     return had_lfs, None
 
 
+def _xos_remote_default_branch():
+    """Default branch of the XOS remote, read from the working manifest snippet.
+
+    Newly tracked projects are added to manifest/snippets/XOS.xml without an
+    explicit revision, so they inherit the XOS remote's revision
+    (refs/heads/XOS-16.2). get_xos_target_branch_for_tracked_project reads the
+    synced .repo copy, which lags fresh tracking; fall back to the working
+    snippet so push-only mode can still resolve a branch for them.
+    """
+    try:
+        top = get_android_top()
+        xos_snippet = top / "manifest/snippets/XOS.xml"
+        if not xos_snippet.exists():
+            return None
+        root = ET.parse(xos_snippet).getroot()
+        remote = root.find("remote[@name='XOS']")
+        if remote is not None and remote.get('revision'):
+            return remote.get('revision').replace('refs/heads/', '')
+    except Exception:
+        pass
+    return None
+
+
 def get_push_parameters(onto, security_patch_level, branch_name, mapping):
     """Get push parameters for GitPython based on branching strategy."""
     if onto and (security_patch_level or branch_name):
         target_branch_name = branch_name if branch_name else f"{onto}-ASB-{security_patch_level}"
         return "XOS", target_branch_name, target_branch_name  # remote, local_branch, remote_branch
     else:
-        target_branch = get_xos_target_branch_for_tracked_project(mapping.local_path)
+        target_branch = (get_xos_target_branch_for_tracked_project(mapping.local_path)
+                         or _xos_remote_default_branch())
         return "XOS", target_branch, target_branch  # remote, local_branch, remote_branch
 
 
@@ -883,23 +1007,34 @@ def perform_single_cherry_pick(task: CherryPickTask, dry_run: bool, cherry_picke
                 aosp_remote.fetch()
 
                 if progress and bucket_task:
-                    progress.update(bucket_task, description=f"[green]Cherry-picking {mapping.local_path} ({patch_ref[:12]})")
+                    progress.update(bucket_task, description=f"[cyan]Checking history {mapping.local_path} ({patch_ref[:12]})")
 
-                # 1. Check if already handled (exists between upstream..HEAD or [ALREADY APPLIED])
+                # 1. Anti-duplicate: a same-title patch or an [ALREADY APPLIED]/
+                #    [NO CHANGE] marker already lives in our base..HEAD. Skip,
+                #    creating nothing, so re-runs don't pile up markers.
                 already_result = check_already_handled(repo, patch_ref, mapping, patch_url, onto_ref if onto else None, cherry_picker)
                 if already_result:
                     return already_result
 
-                # 2. Check if commit exists in upstream → ALREADY APPLIED (only if we have an upstream ref)
-                upstream_ref = find_upstream_ref(repo, onto_ref, mapping) if onto else None
-                existing_commit = find_similar_commit_by_message(repo, patch_ref, similarity_threshold=0.9, until_ref=upstream_ref) if upstream_ref else None
+                # 2. Record-keeping: the fix already lives in the base we forked
+                #    from (a bulletin patch Google had rolled into the AOSP tag, or
+                #    an upstream branch) but isn't marked yet → create an
+                #    [ALREADY APPLIED] so future runs hit case 1. The base is the
+                #    upstream ref in --onto mode and the latest android-* release
+                #    tag in non-onto mode (see resolve_history_base). Matching is by
+                #    normalized subject + shared Change-Id/Bug, which survives the
+                #    trailer drift that defeats whole-message fuzzy matching.
+                search_ref = resolve_history_base(repo, onto_ref if onto else None, mapping)
+                existing_commit = find_already_applied_in_base(repo, patch_ref, search_ref) if search_ref else None
                 if existing_commit:
-                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Found similar commit in upstream: {existing_commit[:8]} for {patch_ref[:8]}")
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: Found same fix in base: {existing_commit[:8]} for {patch_ref[:8]}")
                     return create_already_applied_commit(repo, patch_ref, existing_commit, cherry_picker, mapping, patch_url)
                 else:
-                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No similar commit found for {patch_ref[:8]} (fuzzy matching)")
+                    cherry_picker.verbose_print(f"  [yellow]→[/yellow] {mapping.local_path}: No matching fix in base for {patch_ref[:8]}")
 
                 # 3. Try the cherry-pick
+                if progress and bucket_task:
+                    progress.update(bucket_task, description=f"[green]Cherry-picking {mapping.local_path} ({patch_ref[:12]})")
                 try:
                     repo.git.cherry_pick(patch_ref, '--no-edit')
                 except git.exc.GitCommandError as cherry_pick_error:
@@ -1185,6 +1320,26 @@ class BulletinCherryPicker:
                 console.print(f"[green]✓[/green] Created repository {repo_name}")
         return True, None
 
+    def ensure_local_push_branch(self, repo, result):
+        """Ensure the local branch to push exists, creating it at HEAD if missing.
+
+        Newly tracked repos that received cherry-picks are left on a detached
+        HEAD (repo-managed AOSP checkouts have no local XOS branch). The picks
+        live at HEAD, so pushing XOS-16.2:XOS-16.2 would otherwise fail with no
+        local branch. Create it at HEAD without moving anything that already
+        exists, so patched repos with a real branch are untouched.
+        """
+        branch = result.push_local_branch
+        if not branch:
+            return
+        if any(b.name == branch for b in repo.branches):
+            return
+        try:
+            repo.git.branch(branch, 'HEAD')
+            console.print(f"  [blue]→[/blue] {result.project_path}: created local branch {branch} at HEAD")
+        except git.exc.GitCommandError as e:
+            console.print(f"[yellow]![/yellow] {result.project_path}: could not create local branch {branch}: {e}")
+
     def execute_single_push(self, result):
         """Execute push for a single repository using GitPython."""
         try:
@@ -1225,6 +1380,10 @@ class BulletinCherryPicker:
 
             project_path = self.top / result.project_path
             repo = git.Repo(project_path)
+
+            # Newly tracked repos sit on detached HEAD with the picks at HEAD but
+            # no local branch to push; create it before resolving the push ref.
+            self.ensure_local_push_branch(repo, result)
 
             # Update progress to show current operation
             short_path = truncate_project_name(result.project_path)
