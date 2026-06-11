@@ -103,32 +103,15 @@ def process_project(
         branches = list(full_project.branches.list(iterator=True))
         update_status("Listed branches", advance=1)
 
-        if not branches:
-            update_status("[dim]Skipped - no branches[/dim]", persistent=True)
-            return ProcessResult(
-                project_id=project_id,
-                project_name=project_name,
-                status='skipped',
-                message='No branches found'
-            )
+        # Visibility is enforced independently of the default branch: a freshly
+        # created repo (no branches, or no XOS branch yet) must still be made
+        # public, since a raw push creates GitLab projects private.
+        selected_branch = select_latest_xos_branch(branches) if branches else None
 
-        # Select the latest XOS branch
-        selected_branch = select_latest_xos_branch(branches)
-
-        if not selected_branch:
-            update_status("[dim]Skipped - no XOS branches[/dim]", persistent=True)
-            return ProcessResult(
-                project_id=project_id,
-                project_name=project_name,
-                status='skipped',
-                message='No XOS branches found'
-            )
-
-        # Check if we need to update
         needs_update = False
         changes = []
 
-        if current_default != selected_branch:
+        if selected_branch and current_default != selected_branch:
             needs_update = True
             changes.append(f'branch: {current_default} → {selected_branch}')
 
@@ -137,7 +120,11 @@ def process_project(
             changes.append(f'visibility: {full_project.visibility} → public')
 
         if not needs_update:
-            update_status("[dim]Skipped - already correct[/dim]", persistent=True)
+            if not selected_branch:
+                update_status("[dim]Skipped - no XOS branch, already public[/dim]",
+                              persistent=True)
+            else:
+                update_status("[dim]Skipped - already correct[/dim]", persistent=True)
             return ProcessResult(
                 project_id=project_id,
                 project_name=project_name,
@@ -147,9 +134,11 @@ def process_project(
                 new_branch=selected_branch
             )
 
-        # Update the default branch and visibility
+        # Apply the changes. Only touch default_branch when we actually have a
+        # branch to point at; visibility is always corrected when it's wrong.
         update_status("Saving changes", add_steps=1)
-        full_project.default_branch = selected_branch
+        if selected_branch:
+            full_project.default_branch = selected_branch
         full_project.visibility = 'public'
         full_project.save()
         update_status("Saved", advance=1)
