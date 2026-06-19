@@ -1,6 +1,6 @@
 {
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
   };
 
   outputs =
@@ -78,51 +78,52 @@
                 expat
                 libdrm
                 libbsd
-                xcb-util-cursor
                 libxkbcommon
                 libsForQt5.qt5.qtwayland
                 xwayland
                 crosvm
                 dbus
                 mesa
-              ]
-              ++ (with pkgs.xorg; [
-                libX11
-                libXcursor
+
+                # X11 / xcb libraries (moved out of the deprecated xorg set in nixpkgs 26.05)
+                libx11
+                libxcursor
                 libxcb
                 libxcb-cursor
-                xcb-util-cursor
-                xcbutilimage
-                xcbutilwm
-                xcbutilkeysyms
-                xcbutilrenderutil
-                libXi
-                libXext
+                libxcb-image
+                libxcb-wm
+                libxcb-keysyms
+                libxcb-render-util
+                libxi
+                libxext
                 libxkbfile
-                libSM
-                libICE
-              ]) ++ additionalPkgs;
+                libsm
+                libice
+              ]
+              ++ additionalPkgs;
             profile =
               let
-                bootanimPythonEnv = pkgs.python3.withPackages (ps: with ps; [
-                  pillow
-                  numpy
-                ]);
+                bootanimPythonEnv = pkgs.python3.withPackages (
+                  ps: with ps; [
+                    pillow
+                    numpy
+                  ]
+                );
               in
               builtins.readFile (
-              (pkgs.formats.keyValue { }).generate "" (
-                lib.mapAttrs'
-                  (name: value: {
-                    name = "export ${name}";
-                    inherit value;
-                  })
-                  {
-                    LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
-                    FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
-                    BOOTANIM_PYTHON_ENV="${bootanimPythonEnv}";
-                  }
-              )
-            );
+                (pkgs.formats.keyValue { }).generate "" (
+                  lib.mapAttrs'
+                    (name: value: {
+                      name = "export ${name}";
+                      inherit value;
+                    })
+                    {
+                      LIBGCC_DIR = "${pkgs.libgcc.out}/lib/gcc/${pkgs.libgcc.stdenv.buildPlatform.config}/${pkgs.libgcc.version}";
+                      FONTCONFIG_FILE = with pkgs; makeFontsConf { fontDirectories = [ roboto ]; };
+                      BOOTANIM_PYTHON_ENV = "${bootanimPythonEnv}";
+                    }
+                )
+              );
             extraBuildCommands =
               let
                 cuttlefishCapabilities = pkgs.writeShellScript "" ''
@@ -153,7 +154,7 @@
               packages = [
                 (pkgs.writeShellApplication {
                   name = "aosp-env";
-                  text = ''nix develop path:external/xos/devshell'';
+                  text = "nix develop path:external/xos/devshell";
                 })
                 packages.${system}.execShell
               ];
@@ -179,8 +180,7 @@
         let
           pkgs = import nixpkgs { inherit system; };
         in
-        pkgs.nixfmt-rfc-style
+        pkgs.nixfmt
       );
     };
 }
-
