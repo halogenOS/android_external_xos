@@ -8,6 +8,36 @@
     let
       forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
       lib = nixpkgs.lib;
+
+      # nixpkgs' zsh bakes a global zshenv into the binary (--enable-zshenv) whose
+      # non-NixOS branch unconditionally does `. /etc/zshenv`. Inside an FHS sandbox
+      # /etc/NIXOS is not bind-mounted, so on a NixOS host zsh takes that branch while
+      # /etc/zshenv is still the NixOS-generated file — the two re-source each other
+      # until zsh dies with "job table full or recursion limit exceeded". Inject a
+      # re-entry guard at the top of the global zshenv so a second source returns
+      # immediately, breaking the loop while preserving one-shot behaviour everywhere.
+      # Only the anchor line is touched; the rest of postInstall comes from upstream.
+      guardedZshOverlay = final: prev: {
+        zsh = prev.zsh.overrideAttrs (old: {
+          postInstall =
+            lib.replaceStrings
+              [ "if test -e /etc/NIXOS; then" ]
+              [
+                # Written into the heredoc, so \$ keeps the var for runtime (cat <<EOF
+                # would otherwise expand a bare $ at install time, like upstream's \$ vars).
+                "if [ -n \"\\\$__GLOBAL_ZSHENV_SOURCED\" ]; then return; fi\n__GLOBAL_ZSHENV_SOURCED=1\nif test -e /etc/NIXOS; then"
+              ]
+              old.postInstall;
+        });
+      };
+
+      mkPkgs =
+        system:
+        import nixpkgs {
+          inherit system;
+          overlays = [ guardedZshOverlay ];
+        };
+
       fhs =
         name: pkgs: attrs: additionalPkgs:
         pkgs.buildFHSEnvBubblewrap (
@@ -146,7 +176,7 @@
       packages = forEachSystem (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = mkPkgs system;
         in
         {
           direnvShell = (
@@ -163,7 +193,7 @@
           execShell = fhs "exec-aosp-env" pkgs { } [ ];
           aautoShell =
             let
-              pkgs = import nixpkgs { inherit system; };
+              pkgs = mkPkgs system;
             in
             (fhs "aauto-env" pkgs { runScript = "zsh"; } [ pkgs.llvmPackages_20.libcxx ]).env;
         }
@@ -171,14 +201,14 @@
       devShell = forEachSystem (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = mkPkgs system;
         in
         (fhs "aosp-env" pkgs { runScript = "zsh"; } [ ]).env
       );
       formatter = forEachSystem (
         system:
         let
-          pkgs = import nixpkgs { inherit system; };
+          pkgs = mkPkgs system;
         in
         pkgs.nixfmt
       );
