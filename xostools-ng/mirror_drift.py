@@ -22,6 +22,7 @@ from rich.progress import (
 from rich.table import Table
 from rich.text import Text
 
+from clean_mirror import CleanMirrorPlan, mirror_clean_plans
 from xos_common import (
     GITHUB_ORG,
     GITLAB_GROUP_ID,
@@ -237,6 +238,25 @@ def compare_ref_sets(
     return drift
 
 
+def clean_mirror_candidates(refs: List[RefDrift]) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """Select refs that can be mirrored without discarding GitHub history."""
+    branches = []
+    tags = []
+
+    for ref in refs:
+        if ref.kind == "tag":
+            if ref.location == "gitlab":
+                tags.append(ref.name)
+            continue
+
+        if ref.location == "gitlab":
+            branches.append(ref.name)
+        elif ref.distance and ref.distance.gitlab_only and not ref.distance.github_only:
+            branches.append(ref.name)
+
+    return tuple(branches), tuple(tags)
+
+
 def compare_repository(
     gl: gitlab.Gitlab,
     gitlab_summary: Any,
@@ -388,6 +408,11 @@ def parse_args():
         default=MAX_WORKERS,
         help=f"Number of repositories to compare concurrently (default: {MAX_WORKERS})",
     )
+    parser.add_argument(
+        "--clean-mirror",
+        action="store_true",
+        help="Mirror refs that are missing from or strictly ahead of GitHub",
+    )
     return parser.parse_args()
 
 
@@ -484,13 +509,40 @@ def main():
 
     incomplete = render_repository_drift(results)
     has_drift = bool(gitlab_only or github_only or any(result.refs for result in results))
+    mirror_errors = 0
 
-    if not has_drift and not incomplete:
+    if args.clean_mirror:
+        plans = [
+            CleanMirrorPlan(
+                project_name=gitlab_by_name[key].path,
+                all_refs=True,
+                create_github_repository=True,
+            )
+            for key in gitlab_only_keys
+        ]
+
+        for result in results:
+            branches, tags = clean_mirror_candidates(result.refs)
+            if branches or tags:
+                plans.append(
+                    CleanMirrorPlan(
+                        project_name=result.name,
+                        branches=branches,
+                        tags=tags,
+                    )
+                )
+
+        try:
+            mirror_errors = mirror_clean_plans(plans, github_token, args.workers)
+        except Exception as error:
+            console.print(f"\n[red]Clean mirror failed:[/red] {concise_error(error)}")
+            mirror_errors = 1
+    elif not has_drift and not incomplete:
         console.print("\n[bold green]No drift found.[/bold green]")
     elif not incomplete:
         console.print("\n[bold yellow]Drift found.[/bold yellow]")
 
-    return 1 if incomplete else 0
+    return 1 if incomplete or mirror_errors else 0
 
 
 if __name__ == "__main__":

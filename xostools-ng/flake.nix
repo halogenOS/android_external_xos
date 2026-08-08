@@ -77,6 +77,8 @@
 
           installPhase = ''
             mkdir -p $out/bin
+            mkdir -p $out/${python3Packages.python.sitePackages}
+            cp clean_mirror.py $out/${python3Packages.python.sitePackages}/
             cp mirror_drift.py $out/bin/${pname}
             chmod +x $out/bin/${pname}
           '';
