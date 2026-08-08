@@ -62,6 +62,28 @@
           meta.mainProgram = pname;
         };
 
+        # Mirror drift report as a Python application
+        mirror-drift = python3Packages.buildPythonApplication rec {
+          pname = "mirror-drift";
+          version = "1.0";
+
+          src = ./.;
+
+          format = "other";
+
+          propagatedBuildInputs = [
+            xos-common
+          ];
+
+          installPhase = ''
+            mkdir -p $out/bin
+            cp mirror_drift.py $out/bin/${pname}
+            chmod +x $out/bin/${pname}
+          '';
+
+          meta.mainProgram = pname;
+        };
+
         # Create snapshot script as a Python application
         create-snapshot = python3Packages.buildPythonApplication rec {
           pname = "create-snapshot";
@@ -349,6 +371,7 @@
             echo ""
             echo "Available scripts:"
             echo "  python mirror_all.py        - Mirror repositories"
+            echo "  python mirror_drift.py      - Report GitLab and GitHub mirror drift"
             echo "  python create_snapshot.py   - Create snapshot tags"
             echo "  python merge_upstream.py    - Merge upstream changes"
             echo "  python reticulate_splines.py - Reticulate splines (create branches from upstream)"
@@ -369,6 +392,7 @@
         packages = {
           default = create-snapshot;
           mirror-all = mirror-all;
+          mirror-drift = mirror-drift;
           create-snapshot = create-snapshot;
           merge-upstream = merge-upstream;
           reticulate-splines = reticulate-splines;
@@ -391,6 +415,10 @@
           mirror-all = {
             type = "app";
             program = lib.getExe mirror-all;
+          };
+          mirror-drift = {
+            type = "app";
+            program = lib.getExe mirror-drift;
           };
           create-snapshot = {
             type = "app";
