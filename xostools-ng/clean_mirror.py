@@ -85,6 +85,25 @@ class TruncatedMirrorHistory(RuntimeError):
     """Raised when a selected ref reaches history missing from a local checkout."""
 
 
+class CleanMirrorCancelled(RuntimeError):
+    """Raised when an interrupted mirror worker must stop without retrying."""
+
+
+def check_cancelled(cancel_event: Optional[threading.Event]):
+    """Stop the current worker at the next safe boundary after interruption."""
+    if cancel_event and cancel_event.is_set():
+        raise CleanMirrorCancelled("Interrupted")
+
+
+def wait_before_retry(cancel_event: Optional[threading.Event], seconds: int):
+    """Wait between attempts while allowing interruption to end the wait."""
+    if cancel_event:
+        if cancel_event.wait(seconds):
+            raise CleanMirrorCancelled("Interrupted")
+    else:
+        time.sleep(seconds)
+
+
 def concise_git_message(message: str, limit: int = 300) -> str:
     """Collapse Git output to one bounded line for the final report."""
     compact = " ".join((message or "unknown Git error").split())
@@ -104,18 +123,21 @@ def retry_operation(
     phase: str,
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
     attempts: int = 3,
+    cancel_event: Optional[threading.Event] = None,
 ):
     """Retry a transient Git operation while keeping the live status current."""
     last_error = "unknown Git error"
     for attempt in range(1, attempts + 1):
+        check_cancelled(cancel_event)
         note = None if attempt == 1 else f"retry {attempt}/{attempts}"
         if on_status:
             on_status(phase, note)
         success, last_error = operation()
+        check_cancelled(cancel_event)
         if success:
             return
         if attempt < attempts:
-            time.sleep(attempt)
+            wait_before_retry(cancel_event, attempt)
     raise RuntimeError(
         f"{phase} failed after {attempts} attempts: {concise_git_message(last_error)}"
     )
@@ -144,12 +166,14 @@ def cache_repository(
     project_name: str,
     source_url: str,
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> Path:
     """Return a reusable bare clone, creating it when needed."""
     cache_root = top / ".cache" / "mirror-drift" / "repositories"
     cache_root.mkdir(parents=True, exist_ok=True)
     repo_path = cache_root / f"{project_name}.git"
 
+    check_cancelled(cancel_event)
     if repo_path.exists():
         try:
             git.Repo(repo_path)
@@ -161,18 +185,23 @@ def cache_repository(
 
     last_error = "unknown Git error"
     for attempt in range(1, 4):
+        check_cancelled(cancel_event)
         note = None if attempt == 1 else f"retry {attempt}/3"
         if on_status:
             on_status("cloning GitLab", note)
         try:
             git.Repo.clone_from(source_url, repo_path, bare=True, multi_options=["--no-tags"])
+            check_cancelled(cancel_event)
             return repo_path
+        except CleanMirrorCancelled:
+            raise
         except Exception as error:
             last_error = str(error)
             if repo_path.exists():
                 shutil.rmtree(repo_path)
+            check_cancelled(cancel_event)
             if attempt < 3:
-                time.sleep(attempt)
+                wait_before_retry(cancel_event, attempt)
     raise RuntimeError(
         f"Cloning GitLab failed after 3 attempts: {concise_git_message(last_error)}"
     )
@@ -182,8 +211,10 @@ def configure_and_fetch_source(
     repo_path: Path,
     project_name: str,
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ):
     """Configure and fetch the complete GitLab source state."""
+    check_cancelled(cancel_event)
     source_url, _ = repository_urls(project_name)
 
     if not GitOperations.add_remote(repo_path, "xos", source_url, quiet=True):
@@ -192,11 +223,13 @@ def configure_and_fetch_source(
         lambda: GitOperations.fetch_remote_with_result(repo_path, "xos", prune=True),
         "fetching GitLab branches",
         on_status,
+        cancel_event=cancel_event,
     )
     retry_operation(
         lambda: GitOperations.fetch_remote_tags_with_result(repo_path, "xos"),
         "fetching GitLab tags",
         on_status,
+        cancel_event=cancel_event,
     )
 
 
@@ -204,8 +237,10 @@ def configure_and_fetch_destination(
     repo_path: Path,
     project_name: str,
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ):
     """Configure and fetch the complete GitHub destination state."""
+    check_cancelled(cancel_event)
     _, destination_url = repository_urls(project_name)
 
     if not GitOperations.add_remote(repo_path, "xosgh", destination_url, quiet=True):
@@ -214,11 +249,13 @@ def configure_and_fetch_destination(
         lambda: GitOperations.fetch_remote_with_result(repo_path, "xosgh", prune=True),
         "fetching GitHub branches",
         on_status,
+        cancel_event=cancel_event,
     )
     retry_operation(
         lambda: GitOperations.fetch_remote_tags_with_result(repo_path, "xosgh"),
         "fetching GitHub tags",
         on_status,
+        cancel_event=cancel_event,
     )
 
 
@@ -226,9 +263,12 @@ def selected_refs_reach_truncated_history(
     repo_path: Path,
     branches: Tuple[str, ...],
     tags: Tuple[str, ...],
+    cancel_event: Optional[threading.Event] = None,
 ) -> bool:
     """Whether any selected source ref reaches a genuinely shallow boundary."""
+    check_cancelled(cancel_event)
     truncated = GitOperations.get_truncated_commits(repo_path)
+    check_cancelled(cancel_event)
     if not truncated:
         return False
 
@@ -238,6 +278,7 @@ def selected_refs_reach_truncated_history(
     tag_prefix = GitOperations.remote_tag_ref("xos", "")
 
     for commit in truncated:
+        check_cancelled(cancel_event)
         for ref in GitOperations.refs_containing(repo_path, commit, branch_prefix):
             if ref[len(branch_prefix):] in branch_names:
                 return True
@@ -251,10 +292,14 @@ def prepare_source_refs(
     repo_path: Path,
     plan: CleanMirrorPlan,
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> PreparedSourceRefs:
     """Fetch GitLab and resolve the refs selected by a mirror plan."""
-    configure_and_fetch_source(repo_path, plan.project_name, on_status)
+    configure_and_fetch_source(
+        repo_path, plan.project_name, on_status, cancel_event
+    )
 
+    check_cancelled(cancel_event)
     source_branches = GitOperations.get_remote_branch_shas(repo_path, "xos")
     source_tags = GitOperations.get_remote_tag_shas(repo_path, "xos")
 
@@ -272,7 +317,9 @@ def prepare_source_refs(
 
     if on_status:
         on_status("checking source history", None)
-    if selected_refs_reach_truncated_history(repo_path, branches, tags):
+    if selected_refs_reach_truncated_history(
+        repo_path, branches, tags, cancel_event
+    ):
         raise TruncatedMirrorHistory("Selected refs reach truncated local history")
 
     return PreparedSourceRefs(
@@ -288,9 +335,13 @@ def prepare_destination_refs(
     source: PreparedSourceRefs,
     project_name: str,
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> PreparedRefs:
     """Fetch GitHub after the source is ready and combine both ref states."""
-    configure_and_fetch_destination(source.repo_path, project_name, on_status)
+    configure_and_fetch_destination(
+        source.repo_path, project_name, on_status, cancel_event
+    )
+    check_cancelled(cancel_event)
     return PreparedRefs(
         repo_path=source.repo_path,
         branches=source.branches,
@@ -309,8 +360,10 @@ def push_branch(
     branch: str,
     result: CleanMirrorResult,
     on_note: Optional[Callable[[Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> str:
     """Push a branch only when GitHub can fast-forward to GitLab."""
+    check_cancelled(cancel_event)
     source_sha = refs.source_branches[branch]
     destination_sha = refs.destination_branches.get(branch)
 
@@ -328,6 +381,7 @@ def push_branch(
     success, message = GitOperations.push_branch(
         refs.repo_path, "xos", branch, "xosgh", branch
     )
+    check_cancelled(cancel_event)
     if not success and GitOperations.is_pack_too_big(message):
         def report(pushed, total, chunk):
             if on_note:
@@ -341,6 +395,7 @@ def push_branch(
             branch,
             on_progress=report,
         )
+        check_cancelled(cancel_event)
     if on_note:
         on_note(None)
 
@@ -364,8 +419,10 @@ def push_tag(
     tag: str,
     result: CleanMirrorResult,
     on_note: Optional[Callable[[Optional[str]], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> str:
     """Push a missing tag, staging oversized history through a temporary branch."""
+    check_cancelled(cancel_event)
     if tag in refs.destination_tags:
         if refs.source_tags[tag] == refs.destination_tags[tag]:
             result.up_to_date += 1
@@ -382,6 +439,7 @@ def push_tag(
         "xosgh",
         f"{source_ref}:{destination_ref}",
     )
+    check_cancelled(cancel_event)
     if success:
         if on_note:
             on_note(None)
@@ -389,6 +447,7 @@ def push_tag(
         return "pushed"
 
     if GitOperations.fetch_remote_tags(refs.repo_path, "xosgh", quiet=True):
+        check_cancelled(cancel_event)
         destination_tags = GitOperations.get_remote_tag_shas(refs.repo_path, "xosgh")
         if tag in destination_tags:
             if on_note:
@@ -426,6 +485,7 @@ def push_tag(
         staging_branch,
         on_progress=report,
     )
+    check_cancelled(cancel_event)
 
     if staged:
         if on_note:
@@ -462,6 +522,7 @@ def push_tag(
         return "pushed"
 
     if GitOperations.fetch_remote_tags(refs.repo_path, "xosgh", quiet=True):
+        check_cancelled(cancel_event)
         destination_tags = GitOperations.get_remote_tag_shas(refs.repo_path, "xosgh")
         if tag in destination_tags:
             result.conflicts.append(f"T {tag}: GitHub changed during mirroring")
@@ -477,9 +538,16 @@ def execute_plan(
     local_repositories: Dict[str, Path],
     github_token: str,
     tracker: Optional[CleanMirrorTracker] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> CleanMirrorResult:
     """Mirror one plan using a local checkout or a reusable cache clone."""
     result = CleanMirrorResult(project_name=plan.project_name)
+    try:
+        check_cancelled(cancel_event)
+    except CleanMirrorCancelled as error:
+        result.errors.append(str(error))
+        return result
+
     source_url, _ = repository_urls(plan.project_name)
     local_path = local_repositories.get(plan.project_name.casefold())
     source: Optional[PreparedSourceRefs] = None
@@ -489,18 +557,36 @@ def execute_plan(
         if tracker:
             tracker.status("using local repository")
         try:
-            source = prepare_source_refs(local_path, plan, on_status)
+            source = prepare_source_refs(
+                local_path, plan, on_status, cancel_event
+            )
+        except CleanMirrorCancelled as error:
+            result.errors.append(str(error))
+            return result
         except Exception:
             source = None
 
     if source is None:
         result.used_cache = True
         try:
-            repo_path = cache_repository(top, plan.project_name, source_url, on_status)
-            source = prepare_source_refs(repo_path, plan, on_status)
+            repo_path = cache_repository(
+                top, plan.project_name, source_url, on_status, cancel_event
+            )
+            source = prepare_source_refs(
+                repo_path, plan, on_status, cancel_event
+            )
+        except CleanMirrorCancelled as error:
+            result.errors.append(str(error))
+            return result
         except Exception as error:
             result.errors.append(concise_git_message(str(error)))
             return result
+
+    try:
+        check_cancelled(cancel_event)
+    except CleanMirrorCancelled as error:
+        result.errors.append(str(error))
+        return result
 
     if plan.create_github_repository:
         if tracker:
@@ -511,7 +597,13 @@ def execute_plan(
         result.created_repository = True
 
     try:
-        refs = prepare_destination_refs(source, plan.project_name, on_status)
+        check_cancelled(cancel_event)
+        refs = prepare_destination_refs(
+            source, plan.project_name, on_status, cancel_event
+        )
+    except CleanMirrorCancelled as error:
+        result.errors.append(str(error))
+        return result
     except Exception as error:
         result.errors.append(concise_git_message(str(error)))
         return result
@@ -521,28 +613,56 @@ def execute_plan(
 
     ref_count = len(refs.branches) + len(refs.tags)
     index = 0
+    cancelled = False
     for branch in refs.branches:
         index += 1
         if tracker:
             tracker.start_ref("branch", branch, index, ref_count)
         try:
-            outcome = push_branch(refs, branch, result, tracker.note if tracker else None)
+            check_cancelled(cancel_event)
+            outcome = push_branch(
+                refs,
+                branch,
+                result,
+                tracker.note if tracker else None,
+                cancel_event,
+            )
+        except CleanMirrorCancelled:
+            result.errors.append(f"B {branch}: Interrupted")
+            cancelled = True
+            break
         except Exception as error:
             result.errors.append(f"B {branch}: {concise_git_message(str(error))}")
             outcome = "failed"
         if tracker:
+            if outcome == "failed" and result.errors:
+                tracker.failure(result.errors[-1])
             tracker.finish_ref(outcome)
-    for tag in refs.tags:
-        index += 1
-        if tracker:
-            tracker.start_ref("tag", tag, index, ref_count)
-        try:
-            outcome = push_tag(refs, tag, result, tracker.note if tracker else None)
-        except Exception as error:
-            result.errors.append(f"T {tag}: {concise_git_message(str(error))}")
-            outcome = "failed"
-        if tracker:
-            tracker.finish_ref(outcome)
+
+    if not cancelled:
+        for tag in refs.tags:
+            index += 1
+            if tracker:
+                tracker.start_ref("tag", tag, index, ref_count)
+            try:
+                check_cancelled(cancel_event)
+                outcome = push_tag(
+                    refs,
+                    tag,
+                    result,
+                    tracker.note if tracker else None,
+                    cancel_event,
+                )
+            except CleanMirrorCancelled:
+                result.errors.append(f"T {tag}: Interrupted")
+                break
+            except Exception as error:
+                result.errors.append(f"T {tag}: {concise_git_message(str(error))}")
+                outcome = "failed"
+            if tracker:
+                if outcome == "failed" and result.errors:
+                    tracker.failure(result.errors[-1])
+                tracker.finish_ref(outcome)
 
     return result
 
@@ -587,15 +707,19 @@ def mirror_clean_plans(
     plans: List[CleanMirrorPlan],
     github_token: str,
     workers: int,
+    cancel_event: Optional[threading.Event] = None,
 ) -> int:
     """Mirror clean plans concurrently and return the number of failures."""
     if not plans:
         console.print("\n[dim]CLEAN MIRROR   nothing to push[/dim]")
         return 0
 
+    cancel_event = cancel_event or threading.Event()
     top = get_android_top()
     local_repositories = discover_local_repositories(top)
     results = []
+    collected = set()
+    interrupted = False
     stats = CleanMirrorStats(len(plans))
     progress = Progress(
         SpinnerColumn(),
@@ -617,6 +741,7 @@ def mirror_clean_plans(
                 local_repositories,
                 github_token,
                 tracker,
+                cancel_event,
             )
         except Exception as error:
             result = CleanMirrorResult(
@@ -628,9 +753,13 @@ def mirror_clean_plans(
             bool(result.errors),
             result.used_cache,
             result.created_repository,
+            result.errors,
         )
         progress.update(repo_task, advance=1)
         return result
+
+    executor = ThreadPoolExecutor(max_workers=workers)
+    futures = {}
 
     with Live(console=console, refresh_per_second=4, transient=False) as live:
         def refresh():
@@ -644,16 +773,48 @@ def mirror_clean_plans(
         refresh_thread = threading.Thread(target=refresh_loop)
         refresh_thread.start()
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {
-                executor.submit(run_plan, plan): plan
-                for plan in plans
-            }
+        try:
+            for plan in plans:
+                check_cancelled(cancel_event)
+                futures[executor.submit(run_plan, plan)] = plan
+
             for future in as_completed(futures):
                 results.append(future.result())
+                collected.add(future)
+        except (KeyboardInterrupt, CleanMirrorCancelled):
+            interrupted = True
+            cancel_event.set()
+            console.print("\n[red]Interrupted! Stopping mirror workers...[/red]")
+            for future in futures:
+                future.cancel()
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
 
-        stop_refresh.set()
-        refresh_thread.join()
-        refresh()
+            for future, plan in futures.items():
+                if future in collected or future.cancelled():
+                    continue
+                try:
+                    results.append(future.result())
+                except Exception as error:
+                    results.append(
+                        CleanMirrorResult(
+                            project_name=plan.project_name,
+                            errors=[concise_git_message(str(error))],
+                        )
+                    )
 
-    return render_results(results)
+            stop_refresh.set()
+            refresh_thread.join()
+            refresh()
+
+    if interrupted:
+        counters, _ = stats.snapshot()
+        canceled = counters["repos_total"] - counters["repos_done"]
+        console.print(
+            f"\n[bold red]INTERRUPTED[/bold red]   "
+            f"{counters['repos_done']}/{counters['repos_total']} repositories finished"
+            f" · {canceled} canceled"
+        )
+
+    errors = render_results(results)
+    return max(errors, 1) if interrupted else errors

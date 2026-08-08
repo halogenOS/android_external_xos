@@ -42,6 +42,7 @@ class CleanMirrorStats:
         self.local_repositories = 0
         self.cached_repositories = 0
         self.created_repositories = 0
+        self.recent_failures: List[str] = []
 
     def start_repository(self, project_name: str) -> int:
         with self._lock:
@@ -76,15 +77,27 @@ class CleanMirrorStats:
             elif outcome == "current":
                 self.current += 1
 
+    def _record_failure(self, project_name: str, error: str):
+        failure = f"{project_name}: {error}"
+        if failure not in self.recent_failures:
+            self.recent_failures.append(failure)
+        self.recent_failures = self.recent_failures[-8:]
+
+    def record_failure(self, project_name: str, error: str):
+        with self._lock:
+            self._record_failure(project_name, error)
+
     def finish_repository(
         self,
         activity_id: int,
         failed: bool,
         used_cache: bool,
         created_repository: bool,
+        errors: Optional[List[str]] = None,
     ):
         with self._lock:
-            self.inflight.pop(activity_id, None)
+            entry = self.inflight.pop(activity_id, None)
+            project_name = entry[0].project_name if entry else "unknown repository"
             self.repos_done += 1
             if failed:
                 self.repos_failed += 1
@@ -94,6 +107,8 @@ class CleanMirrorStats:
                 self.local_repositories += 1
             if created_repository:
                 self.created_repositories += 1
+            for error in errors or []:
+                self._record_failure(project_name, error)
 
     def total_refs(self) -> int:
         with self._lock:
@@ -102,7 +117,7 @@ class CleanMirrorStats:
     def snapshot(self) -> Tuple[dict, List[Tuple[MirrorActivity, float]]]:
         with self._lock:
             counters = {
-                name: value
+                name: list(value) if isinstance(value, list) else value
                 for name, value in self.__dict__.items()
                 if not name.startswith("_") and name != "inflight"
             }
@@ -120,6 +135,7 @@ class CleanMirrorTracker:
         self.stats = stats
         self.progress = progress
         self.ref_task = ref_task
+        self.project_name = project_name
         self.activity_id = stats.start_repository(project_name)
 
     def status(self, phase: str, note: Optional[str] = None, restart: bool = True):
@@ -152,6 +168,9 @@ class CleanMirrorTracker:
 
     def note(self, note: Optional[str]):
         self.stats.update_activity(self.activity_id, note=note)
+
+    def failure(self, error: str):
+        self.stats.record_failure(self.project_name, error)
 
     def finish_ref(self, outcome: str):
         self.stats.record_ref(outcome)
@@ -211,5 +230,13 @@ def render_clean_status(stats: CleanMirrorStats, max_rows: int = 8) -> Table:
         if len(inflight) > max_rows:
             table.add_row("", f"[dim]… and {len(inflight) - max_rows} more[/dim]", "", "", "")
         grid.add_row(table)
+
+    if counters["recent_failures"]:
+        failures = Table.grid(padding=(0, 1))
+        failures.add_column(style="red", no_wrap=True)
+        failures.add_column(style="red")
+        for failure in counters["recent_failures"][-5:]:
+            failures.add_row("  !", failure)
+        grid.add_row(failures)
 
     return grid

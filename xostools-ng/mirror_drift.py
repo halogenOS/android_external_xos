@@ -2,7 +2,6 @@
 """Report repository and ref drift between the XOS GitLab and GitHub mirrors."""
 
 import argparse
-import signal
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -38,7 +37,6 @@ GITLAB_STYLE = "yellow"
 GITHUB_STYLE = "cyan"
 
 stop_event = threading.Event()
-executor = None
 
 
 @dataclass(frozen=True)
@@ -80,18 +78,6 @@ class RepositoryDrift:
 
 class ComparisonUnavailable(RuntimeError):
     """Raised when neither service can compare both commit objects."""
-
-
-def signal_handler(signum, frame):
-    """Handle SIGINT (Ctrl+C) gracefully."""
-    console.print("\n[red]Interrupted! Shutting down workers...[/red]")
-    stop_event.set()
-    if executor:
-        executor.shutdown(wait=False, cancel_futures=True)
-    sys.exit(1)
-
-
-signal.signal(signal.SIGINT, signal_handler)
 
 
 def ref_commit_sha(ref: Any) -> str:
@@ -418,7 +404,7 @@ def parse_args():
 
 def main():
     """Discover both namespaces and report every difference."""
-    global executor
+    stop_event.clear()
     args = parse_args()
 
     if args.workers < 1:
@@ -479,7 +465,6 @@ def main():
         task = progress.add_task("[cyan]Comparing repositories", total=len(paired_keys))
 
         with ThreadPoolExecutor(max_workers=args.workers) as executor_pool:
-            executor = executor_pool
             futures = {
                 executor_pool.submit(
                     compare_repository,
@@ -491,10 +476,6 @@ def main():
             }
 
             for future in as_completed(futures):
-                if stop_event.is_set():
-                    executor_pool.shutdown(wait=False, cancel_futures=True)
-                    break
-
                 key = futures[future]
                 try:
                     results.append(future.result())
@@ -533,7 +514,9 @@ def main():
                 )
 
         try:
-            mirror_errors = mirror_clean_plans(plans, github_token, args.workers)
+            mirror_errors = mirror_clean_plans(
+                plans, github_token, args.workers, stop_event
+            )
         except Exception as error:
             console.print(f"\n[red]Clean mirror failed:[/red] {concise_error(error)}")
             mirror_errors = 1
@@ -546,4 +529,9 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        stop_event.set()
+        console.print("\n[bold red]Interrupted.[/bold red]")
+        sys.exit(130)
