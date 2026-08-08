@@ -1,12 +1,16 @@
 """Safely mirror non-conflicting GitLab refs to GitHub."""
 
 import shutil
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import git
+from rich.console import Group
+from rich.live import Live
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -17,6 +21,7 @@ from rich.progress import (
 )
 from rich.text import Text
 
+from mirror_progress import CleanMirrorStats, CleanMirrorTracker, render_clean_status
 from xos_common import (
     GITHUB_ORG,
     GitOperations,
@@ -80,11 +85,39 @@ class TruncatedMirrorHistory(RuntimeError):
     """Raised when a selected ref reaches history missing from a local checkout."""
 
 
+def concise_git_message(message: str, limit: int = 300) -> str:
+    """Collapse Git output to one bounded line for the final report."""
+    compact = " ".join((message or "unknown Git error").split())
+    return compact[:limit] + ("…" if len(compact) > limit else "")
+
+
 def repository_urls(project_name: str) -> Tuple[str, str]:
     """Return the GitLab source and GitHub destination SSH URLs."""
     return (
         f"git@git.halogenos.org:halogenOS/{project_name}",
         f"git@github.com:{GITHUB_ORG}/{project_name}",
+    )
+
+
+def retry_operation(
+    operation: Callable[[], Tuple[bool, str]],
+    phase: str,
+    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+    attempts: int = 3,
+):
+    """Retry a transient Git operation while keeping the live status current."""
+    last_error = "unknown Git error"
+    for attempt in range(1, attempts + 1):
+        note = None if attempt == 1 else f"retry {attempt}/{attempts}"
+        if on_status:
+            on_status(phase, note)
+        success, last_error = operation()
+        if success:
+            return
+        if attempt < attempts:
+            time.sleep(attempt)
+    raise RuntimeError(
+        f"{phase} failed after {attempts} attempts: {concise_git_message(last_error)}"
     )
 
 
@@ -106,7 +139,12 @@ def discover_local_repositories(top: Path) -> Dict[str, Path]:
     return repositories
 
 
-def cache_repository(top: Path, project_name: str, source_url: str) -> Path:
+def cache_repository(
+    top: Path,
+    project_name: str,
+    source_url: str,
+    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+) -> Path:
     """Return a reusable bare clone, creating it when needed."""
     cache_root = top / ".cache" / "mirror-drift" / "repositories"
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -117,39 +155,71 @@ def cache_repository(top: Path, project_name: str, source_url: str) -> Path:
             git.Repo(repo_path)
         except git.exc.InvalidGitRepositoryError as error:
             raise RuntimeError(f"Cache path is not a Git repository: {repo_path}") from error
+        if on_status:
+            on_status("using cache", None)
         return repo_path
 
-    try:
-        git.Repo.clone_from(source_url, repo_path, bare=True, multi_options=["--no-tags"])
-    except Exception:
-        if repo_path.exists():
-            shutil.rmtree(repo_path)
-        raise
-    return repo_path
+    last_error = "unknown Git error"
+    for attempt in range(1, 4):
+        note = None if attempt == 1 else f"retry {attempt}/3"
+        if on_status:
+            on_status("cloning GitLab", note)
+        try:
+            git.Repo.clone_from(source_url, repo_path, bare=True, multi_options=["--no-tags"])
+            return repo_path
+        except Exception as error:
+            last_error = str(error)
+            if repo_path.exists():
+                shutil.rmtree(repo_path)
+            if attempt < 3:
+                time.sleep(attempt)
+    raise RuntimeError(
+        f"Cloning GitLab failed after 3 attempts: {concise_git_message(last_error)}"
+    )
 
 
-def configure_and_fetch_source(repo_path: Path, project_name: str):
+def configure_and_fetch_source(
+    repo_path: Path,
+    project_name: str,
+    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+):
     """Configure and fetch the complete GitLab source state."""
     source_url, _ = repository_urls(project_name)
 
-    if not GitOperations.add_remote(repo_path, "xos", source_url):
+    if not GitOperations.add_remote(repo_path, "xos", source_url, quiet=True):
         raise RuntimeError("Failed to add the GitLab remote")
-    if not GitOperations.fetch_remote(repo_path, "xos", prune=True):
-        raise RuntimeError("Failed to fetch GitLab branches")
-    if not GitOperations.fetch_remote_tags(repo_path, "xos"):
-        raise RuntimeError("Failed to fetch GitLab tags")
+    retry_operation(
+        lambda: GitOperations.fetch_remote_with_result(repo_path, "xos", prune=True),
+        "fetching GitLab branches",
+        on_status,
+    )
+    retry_operation(
+        lambda: GitOperations.fetch_remote_tags_with_result(repo_path, "xos"),
+        "fetching GitLab tags",
+        on_status,
+    )
 
 
-def configure_and_fetch_destination(repo_path: Path, project_name: str):
+def configure_and_fetch_destination(
+    repo_path: Path,
+    project_name: str,
+    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+):
     """Configure and fetch the complete GitHub destination state."""
     _, destination_url = repository_urls(project_name)
 
-    if not GitOperations.add_remote(repo_path, "xosgh", destination_url):
+    if not GitOperations.add_remote(repo_path, "xosgh", destination_url, quiet=True):
         raise RuntimeError("Failed to add the GitHub remote")
-    if not GitOperations.fetch_remote(repo_path, "xosgh", prune=True):
-        raise RuntimeError("Failed to fetch GitHub branches")
-    if not GitOperations.fetch_remote_tags(repo_path, "xosgh"):
-        raise RuntimeError("Failed to fetch GitHub tags")
+    retry_operation(
+        lambda: GitOperations.fetch_remote_with_result(repo_path, "xosgh", prune=True),
+        "fetching GitHub branches",
+        on_status,
+    )
+    retry_operation(
+        lambda: GitOperations.fetch_remote_tags_with_result(repo_path, "xosgh"),
+        "fetching GitHub tags",
+        on_status,
+    )
 
 
 def selected_refs_reach_truncated_history(
@@ -177,9 +247,13 @@ def selected_refs_reach_truncated_history(
     return False
 
 
-def prepare_source_refs(repo_path: Path, plan: CleanMirrorPlan) -> PreparedSourceRefs:
+def prepare_source_refs(
+    repo_path: Path,
+    plan: CleanMirrorPlan,
+    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
+) -> PreparedSourceRefs:
     """Fetch GitLab and resolve the refs selected by a mirror plan."""
-    configure_and_fetch_source(repo_path, plan.project_name)
+    configure_and_fetch_source(repo_path, plan.project_name, on_status)
 
     source_branches = GitOperations.get_remote_branch_shas(repo_path, "xos")
     source_tags = GitOperations.get_remote_tag_shas(repo_path, "xos")
@@ -196,6 +270,8 @@ def prepare_source_refs(repo_path: Path, plan: CleanMirrorPlan) -> PreparedSourc
     if missing:
         raise RuntimeError(f"GitLab refs disappeared: {', '.join(missing)}")
 
+    if on_status:
+        on_status("checking source history", None)
     if selected_refs_reach_truncated_history(repo_path, branches, tags):
         raise TruncatedMirrorHistory("Selected refs reach truncated local history")
 
@@ -211,9 +287,10 @@ def prepare_source_refs(repo_path: Path, plan: CleanMirrorPlan) -> PreparedSourc
 def prepare_destination_refs(
     source: PreparedSourceRefs,
     project_name: str,
+    on_status: Optional[Callable[[str, Optional[str]], None]] = None,
 ) -> PreparedRefs:
     """Fetch GitHub after the source is ready and combine both ref states."""
-    configure_and_fetch_destination(source.repo_path, project_name)
+    configure_and_fetch_destination(source.repo_path, project_name, on_status)
     return PreparedRefs(
         repo_path=source.repo_path,
         branches=source.branches,
@@ -227,60 +304,171 @@ def prepare_destination_refs(
     )
 
 
-def push_branch(refs: PreparedRefs, branch: str, result: CleanMirrorResult):
+def push_branch(
+    refs: PreparedRefs,
+    branch: str,
+    result: CleanMirrorResult,
+    on_note: Optional[Callable[[Optional[str]], None]] = None,
+) -> str:
     """Push a branch only when GitHub can fast-forward to GitLab."""
     source_sha = refs.source_branches[branch]
     destination_sha = refs.destination_branches.get(branch)
 
     if source_sha == destination_sha:
         result.up_to_date += 1
-        return
+        return "current"
     if destination_sha and not GitOperations.is_ancestor(
         refs.repo_path, destination_sha, source_sha
     ):
         result.conflicts.append(f"B {branch}: GitHub has unique commits")
-        return
+        return "skipped"
 
+    if on_note:
+        on_note("sending")
     success, message = GitOperations.push_branch(
         refs.repo_path, "xos", branch, "xosgh", branch
     )
     if not success and GitOperations.is_pack_too_big(message):
+        def report(pushed, total, chunk):
+            if on_note:
+                on_note(f"chunked {pushed}/{total} commits, next {chunk}")
+
         success, message = GitOperations.push_branch_in_chunks(
-            refs.repo_path, "xos", branch, "xosgh", branch
+            refs.repo_path,
+            "xos",
+            branch,
+            "xosgh",
+            branch,
+            on_progress=report,
         )
+    if on_note:
+        on_note(None)
 
     if success:
         result.branches_pushed += 1
-    elif (
+        return "pushed"
+    if (
         message in ("non-fast-forward", f"{branch}-{source_sha[:7]}")
         or "non-fast-forward" in message.lower()
         or "fetch first" in message.lower()
     ):
         result.conflicts.append(f"B {branch}: GitHub changed during mirroring")
-    else:
-        result.errors.append(f"B {branch}: {message}")
+        return "skipped"
+
+    result.errors.append(f"B {branch}: {concise_git_message(message)}")
+    return "failed"
 
 
-def push_tag(refs: PreparedRefs, tag: str, result: CleanMirrorResult):
-    """Push a tag only when the name does not already exist on GitHub."""
+def push_tag(
+    refs: PreparedRefs,
+    tag: str,
+    result: CleanMirrorResult,
+    on_note: Optional[Callable[[Optional[str]], None]] = None,
+) -> str:
+    """Push a missing tag, staging oversized history through a temporary branch."""
     if tag in refs.destination_tags:
         if refs.source_tags[tag] == refs.destination_tags[tag]:
             result.up_to_date += 1
-        else:
-            result.conflicts.append(f"T {tag}: GitHub tag already exists")
-        return
+            return "current"
+        result.conflicts.append(f"T {tag}: GitHub tag already exists")
+        return "skipped"
 
     source_ref = GitOperations.remote_tag_ref("xos", tag)
-    if GitOperations.push_tag_from_ref(refs.repo_path, source_ref, tag, "xosgh"):
+    destination_ref = f"refs/tags/{tag}"
+    if on_note:
+        on_note("sending")
+    success, message = GitOperations.run_push(
+        refs.repo_path,
+        "xosgh",
+        f"{source_ref}:{destination_ref}",
+    )
+    if success:
+        if on_note:
+            on_note(None)
         result.tags_pushed += 1
-        return
+        return "pushed"
 
-    if GitOperations.fetch_remote_tags(refs.repo_path, "xosgh"):
+    if GitOperations.fetch_remote_tags(refs.repo_path, "xosgh", quiet=True):
+        destination_tags = GitOperations.get_remote_tag_shas(refs.repo_path, "xosgh")
+        if tag in destination_tags:
+            if on_note:
+                on_note(None)
+            result.conflicts.append(f"T {tag}: GitHub changed during mirroring")
+            return "skipped"
+
+    if not GitOperations.is_pack_too_big(message):
+        if on_note:
+            on_note(None)
+        result.errors.append(f"T {tag}: {concise_git_message(message)}")
+        return "failed"
+
+    repo = git.Repo(refs.repo_path)
+    try:
+        target_commit = repo.git.rev_parse(f"{source_ref}^{{commit}}")
+    except git.exc.GitCommandError as error:
+        if on_note:
+            on_note(None)
+        result.errors.append(f"T {tag}: cannot resolve commit: {concise_git_message(str(error))}")
+        return "failed"
+
+    staging_branch = f"mirror-staging/{target_commit[:12]}"
+
+    def report(pushed, total, chunk):
+        if on_note:
+            on_note(f"chunked {pushed}/{total} commits, next {chunk}")
+
+    if on_note:
+        on_note("too big, walking history")
+    staged, stage_message = GitOperations.push_commit_in_chunks(
+        refs.repo_path,
+        source_ref,
+        "xosgh",
+        staging_branch,
+        on_progress=report,
+    )
+
+    if staged:
+        if on_note:
+            on_note("publishing tag")
+        success, message = GitOperations.run_push(
+            refs.repo_path,
+            "xosgh",
+            f"{source_ref}:{destination_ref}",
+        )
+    else:
+        success = False
+        message = stage_message
+
+    if on_note:
+        on_note("removing staging branch")
+    cleanup_ok, cleanup_message = GitOperations.run_push(
+        refs.repo_path,
+        "xosgh",
+        f":refs/heads/{staging_branch}",
+    )
+    if not cleanup_ok and "remote ref does not exist" not in cleanup_message.lower():
+        result.errors.append(
+            f"T {tag}: failed to remove {staging_branch}: "
+            f"{concise_git_message(cleanup_message)}"
+        )
+        if on_note:
+            on_note(None)
+        return "failed"
+
+    if on_note:
+        on_note(None)
+    if success:
+        result.tags_pushed += 1
+        return "pushed"
+
+    if GitOperations.fetch_remote_tags(refs.repo_path, "xosgh", quiet=True):
         destination_tags = GitOperations.get_remote_tag_shas(refs.repo_path, "xosgh")
         if tag in destination_tags:
             result.conflicts.append(f"T {tag}: GitHub changed during mirroring")
-            return
-    result.errors.append(f"T {tag}: push failed")
+            return "skipped"
+
+    result.errors.append(f"T {tag}: {concise_git_message(message)}")
+    return "failed"
 
 
 def execute_plan(
@@ -288,44 +476,73 @@ def execute_plan(
     top: Path,
     local_repositories: Dict[str, Path],
     github_token: str,
+    tracker: Optional[CleanMirrorTracker] = None,
 ) -> CleanMirrorResult:
     """Mirror one plan using a local checkout or a reusable cache clone."""
     result = CleanMirrorResult(project_name=plan.project_name)
     source_url, _ = repository_urls(plan.project_name)
     local_path = local_repositories.get(plan.project_name.casefold())
     source: Optional[PreparedSourceRefs] = None
+    on_status = tracker.status if tracker else None
 
     if local_path:
+        if tracker:
+            tracker.status("using local repository")
         try:
-            source = prepare_source_refs(local_path, plan)
+            source = prepare_source_refs(local_path, plan, on_status)
         except Exception:
             source = None
 
     if source is None:
         result.used_cache = True
         try:
-            repo_path = cache_repository(top, plan.project_name, source_url)
-            source = prepare_source_refs(repo_path, plan)
+            repo_path = cache_repository(top, plan.project_name, source_url, on_status)
+            source = prepare_source_refs(repo_path, plan, on_status)
         except Exception as error:
-            result.errors.append(str(error))
+            result.errors.append(concise_git_message(str(error)))
             return result
 
     if plan.create_github_repository:
-        if not create_github_repo(plan.project_name, github_token):
+        if tracker:
+            tracker.status("creating GitHub repository")
+        if not create_github_repo(plan.project_name, github_token, quiet=True):
             result.errors.append("Failed to create the GitHub repository")
             return result
         result.created_repository = True
 
     try:
-        refs = prepare_destination_refs(source, plan.project_name)
+        refs = prepare_destination_refs(source, plan.project_name, on_status)
     except Exception as error:
-        result.errors.append(str(error))
+        result.errors.append(concise_git_message(str(error)))
         return result
 
+    if tracker:
+        tracker.queue(len(refs.branches), len(refs.tags))
+
+    ref_count = len(refs.branches) + len(refs.tags)
+    index = 0
     for branch in refs.branches:
-        push_branch(refs, branch, result)
+        index += 1
+        if tracker:
+            tracker.start_ref("branch", branch, index, ref_count)
+        try:
+            outcome = push_branch(refs, branch, result, tracker.note if tracker else None)
+        except Exception as error:
+            result.errors.append(f"B {branch}: {concise_git_message(str(error))}")
+            outcome = "failed"
+        if tracker:
+            tracker.finish_ref(outcome)
     for tag in refs.tags:
-        push_tag(refs, tag, result)
+        index += 1
+        if tracker:
+            tracker.start_ref("tag", tag, index, ref_count)
+        try:
+            outcome = push_tag(refs, tag, result, tracker.note if tracker else None)
+        except Exception as error:
+            result.errors.append(f"T {tag}: {concise_git_message(str(error))}")
+            outcome = "failed"
+        if tracker:
+            tracker.finish_ref(outcome)
 
     return result
 
@@ -379,41 +596,64 @@ def mirror_clean_plans(
     top = get_android_top()
     local_repositories = discover_local_repositories(top)
     results = []
-
-    with Progress(
+    stats = CleanMirrorStats(len(plans))
+    progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),
         MofNCompleteColumn(),
         TimeElapsedColumn(),
         console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("[cyan]Mirroring clean refs", total=len(plans))
+    )
+    repo_task = progress.add_task("[cyan]Mirroring repositories", total=len(plans))
+    ref_task = progress.add_task("[cyan]Pushing refs", total=0)
+
+    def run_plan(plan: CleanMirrorPlan) -> CleanMirrorResult:
+        tracker = CleanMirrorTracker(stats, progress, ref_task, plan.project_name)
+        try:
+            result = execute_plan(
+                plan,
+                top,
+                local_repositories,
+                github_token,
+                tracker,
+            )
+        except Exception as error:
+            result = CleanMirrorResult(
+                project_name=plan.project_name,
+                errors=[concise_git_message(str(error))],
+            )
+        stats.finish_repository(
+            tracker.activity_id,
+            bool(result.errors),
+            result.used_cache,
+            result.created_repository,
+        )
+        progress.update(repo_task, advance=1)
+        return result
+
+    with Live(console=console, refresh_per_second=4, transient=False) as live:
+        def refresh():
+            live.update(Group(progress.get_renderable(), render_clean_status(stats)))
+
+        def refresh_loop():
+            while not stop_refresh.wait(0.25):
+                refresh()
+
+        stop_refresh = threading.Event()
+        refresh_thread = threading.Thread(target=refresh_loop)
+        refresh_thread.start()
 
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(
-                    execute_plan,
-                    plan,
-                    top,
-                    local_repositories,
-                    github_token,
-                ): plan
+                executor.submit(run_plan, plan): plan
                 for plan in plans
             }
-
             for future in as_completed(futures):
-                plan = futures[future]
-                try:
-                    results.append(future.result())
-                except Exception as error:
-                    results.append(
-                        CleanMirrorResult(
-                            project_name=plan.project_name,
-                            errors=[str(error)],
-                        )
-                    )
-                progress.update(task, advance=1)
+                results.append(future.result())
+
+        stop_refresh.set()
+        refresh_thread.join()
+        refresh()
 
     return render_results(results)

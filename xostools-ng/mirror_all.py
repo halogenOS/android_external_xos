@@ -299,8 +299,10 @@ def push_item(task: PushTask) -> Tuple[str, str, str, bool, Optional[str]]:
     if task.task_type == 'diverged-tag':
         # Already known to have diverged, so go straight to the tag.
         source_ref = f"refs/remotes/xos/{task.origin_branch}"
-        success = GitOperations.push_tag_from_ref(task.repo_path, source_ref, task.item, "xosgh")
-        return task.path, task.origin_branch, 'branch->tag', success, task.item
+        success, message = GitOperations.push_tag_from_ref_with_result(
+            task.repo_path, source_ref, task.item, "xosgh")
+        extra = task.item if success else message
+        return task.path, task.origin_branch, 'branch->tag', success, extra
 
     if task.task_type == 'branch':
         success, result = GitOperations.push_branch(task.repo_path, "xos", task.item, "xosgh", task.item)
@@ -326,8 +328,9 @@ def push_item(task: PushTask) -> Tuple[str, str, str, bool, Optional[str]]:
         return task.path, task.item, 'branch', success, result
     else:  # tag
         source_ref = GitOperations.remote_tag_ref("xos", task.item)
-        success = GitOperations.push_tag_from_ref(task.repo_path, source_ref, task.item, "xosgh")
-        return task.path, task.item, 'tag', success, None
+        success, message = GitOperations.push_tag_from_ref_with_result(
+            task.repo_path, source_ref, task.item, "xosgh")
+        return task.path, task.item, 'tag', success, None if success else message
 
 def push_repo(job: RepoPushJob, stats: MirrorStats, progress, push_task) -> Tuple[int, int]:
     """Push one repository's refs sequentially, reporting each as it lands."""

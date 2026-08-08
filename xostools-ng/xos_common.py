@@ -168,7 +168,8 @@ class GitOperations:
             return False
 
     @staticmethod
-    def add_remote(repo_path: Path, remote_name: str, remote_url: str) -> bool:
+    def add_remote(repo_path: Path, remote_name: str, remote_url: str,
+                   quiet: bool = False) -> bool:
         try:
             repo = git.Repo(repo_path)
 
@@ -180,7 +181,8 @@ class GitOperations:
             repo.create_remote(remote_name, remote_url)
             return True
         except Exception as e:
-            print(f"Error adding remote {remote_name}: {e}")
+            if not quiet:
+                print(f"Error adding remote {remote_name}: {e}")
             return False
 
     # Namespace for mirroring bookkeeping refs, so that a remote's tags can be
@@ -188,8 +190,10 @@ class GitOperations:
     MIRROR_STATE_NAMESPACE = "refs/mirror-state"
 
     @staticmethod
-    def fetch_remote(repo_path: Path, remote_name: str, prune: bool = False,
-                     refspec: Optional[str] = None) -> bool:
+    def fetch_remote_with_result(repo_path: Path, remote_name: str,
+                                 prune: bool = False,
+                                 refspec: Optional[str] = None) -> tuple[bool, str]:
+        """Fetch a remote and return the error text without printing it."""
         try:
             repo = git.Repo(repo_path)
             remote = repo.remote(remote_name)
@@ -200,17 +204,40 @@ class GitOperations:
                 remote.fetch(refspec=refspec, force=True, **kwargs)
             else:
                 remote.fetch(**kwargs)
-            return True
+            return True, ""
         except Exception as e:
-            print(f"Error fetching from {remote_name}: {e}")
-            return False
+            return False, str(e)
 
     @staticmethod
-    def fetch_remote_tags(repo_path: Path, remote_name: str) -> bool:
-        """Fetch a remote's tags into a per-remote namespace."""
+    def fetch_remote(repo_path: Path, remote_name: str, prune: bool = False,
+                     refspec: Optional[str] = None, quiet: bool = False) -> bool:
+        success, message = GitOperations.fetch_remote_with_result(
+            repo_path, remote_name, prune, refspec)
+        if not success and not quiet:
+            print(f"Error fetching from {remote_name}: {message}")
+        return success
+
+    @staticmethod
+    def fetch_remote_tags_with_result(repo_path: Path,
+                                      remote_name: str) -> tuple[bool, str]:
+        """Fetch a remote's tags and return any error without printing it."""
         namespace = GitOperations._tag_namespace(remote_name)
-        return GitOperations.fetch_remote(repo_path, remote_name, prune=True,
-                                          refspec=f"+refs/tags/*:{namespace}/*")
+        return GitOperations.fetch_remote_with_result(
+            repo_path,
+            remote_name,
+            prune=True,
+            refspec=f"+refs/tags/*:{namespace}/*",
+        )
+
+    @staticmethod
+    def fetch_remote_tags(repo_path: Path, remote_name: str,
+                          quiet: bool = False) -> bool:
+        """Fetch a remote's tags into a per-remote namespace."""
+        success, message = GitOperations.fetch_remote_tags_with_result(
+            repo_path, remote_name)
+        if not success and not quiet:
+            print(f"Error fetching tags from {remote_name}: {message}")
+        return success
 
     @staticmethod
     def _tag_namespace(remote_name: str) -> str:
@@ -331,30 +358,19 @@ class GitOperations:
         return any(marker in lowered for marker in GitOperations.PACK_TOO_BIG_MARKERS)
 
     @staticmethod
-    def push_branch_in_chunks(repo_path: Path, source_remote: str, source_branch: str,
+    def push_commit_in_chunks(repo_path: Path, source_ref: str,
                               dest_remote: str, dest_branch: str,
                               on_progress=None) -> tuple[bool, str]:
-        """Advance a branch on the remote in chunks of history.
-
-        A single push has to be accepted as one pack, so a branch carrying more
-        history than the server will take can never go up in one attempt. Walk
-        it instead: push an intermediate commit, and the branch fast-forwards to
-        it, which shrinks what the next attempt has to carry. The chunk halves
-        on every rejection and doubles again after every success, so the walk
-        settles on a size the server accepts without rediscovering the limit
-        from scratch each time.
-        """
+        """Advance a destination branch toward an arbitrary commit in chunks."""
         try:
             repo = git.Repo(repo_path)
-            remote = repo.remote(dest_remote)
-            target = f'{source_remote}/{source_branch}'
 
-            # Only the commits the mirror is missing have to be walked.
+            # Only the commits the destination branch is missing have to be walked.
             try:
                 base = repo.git.rev_parse(f'{dest_remote}/{dest_branch}')
-                commit_range = f'{base}..{target}'
+                commit_range = f'{base}..{source_ref}'
             except git.exc.GitCommandError:
-                commit_range = target
+                commit_range = source_ref
 
             # Topological order guarantees a commit's ancestors come before it,
             # so pushing the commit at any position sends only what precedes it.
@@ -406,6 +422,19 @@ class GitOperations:
             return False, str(e)
 
     @staticmethod
+    def push_branch_in_chunks(repo_path: Path, source_remote: str, source_branch: str,
+                              dest_remote: str, dest_branch: str,
+                              on_progress=None) -> tuple[bool, str]:
+        """Advance a branch on the remote in adaptively sized history chunks."""
+        return GitOperations.push_commit_in_chunks(
+            repo_path,
+            f'{source_remote}/{source_branch}',
+            dest_remote,
+            dest_branch,
+            on_progress,
+        )
+
+    @staticmethod
     def push_branch(repo_path: Path, source_remote: str, source_branch: str,
                    dest_remote: str, dest_branch: str) -> tuple[bool, str]:
         try:
@@ -431,25 +460,23 @@ class GitOperations:
             return False, f"Error: {str(e)}"
 
     @staticmethod
+    def push_tag_from_ref_with_result(repo_path: Path, source_ref: str,
+                                      tag_name: str,
+                                      remote_name: str) -> tuple[bool, str]:
+        """Push an arbitrary ref to the remote as a tag and return its output."""
+        return GitOperations.run_push(
+            repo_path,
+            remote_name,
+            f'{source_ref}:refs/tags/{tag_name}',
+        )
+
+    @staticmethod
     def push_tag_from_ref(repo_path: Path, source_ref: str, tag_name: str,
                           remote_name: str) -> bool:
-        """Push an arbitrary ref to the remote as a tag.
-
-        Lets a mirror relay another remote's tags without creating them locally.
-        """
-        try:
-            repo = git.Repo(repo_path)
-            remote = repo.remote(remote_name)
-            push_infos = remote.push(refspec=f'{source_ref}:refs/tags/{tag_name}')
-
-            for info in push_infos:
-                if info.flags & info.ERROR:
-                    return False
-
-            return True
-        except Exception as e:
-            print(f"Error pushing tag {tag_name}: {e}")
-            return False
+        """Push an arbitrary ref to the remote as a tag."""
+        success, _ = GitOperations.push_tag_from_ref_with_result(
+            repo_path, source_ref, tag_name, remote_name)
+        return success
 
     @staticmethod
     def push_tag(repo_path: Path, tag_name: str, remote_name: str) -> bool:
@@ -578,7 +605,8 @@ def get_github_token() -> Optional[str]:
         print(f"Error reading token: {e}")
         return None
 
-def create_github_repo(repo_name: str, github_token: str) -> bool:
+def create_github_repo(repo_name: str, github_token: str,
+                       quiet: bool = False) -> bool:
     """Create a GitHub repository in the organization."""
     try:
         g = Github(github_token)
@@ -598,10 +626,12 @@ def create_github_repo(repo_name: str, github_token: str) -> bool:
             has_wiki=False,
             auto_init=False
         )
-        print(f"Created GitHub repository: {repo_name}")
+        if not quiet:
+            print(f"Created GitHub repository: {repo_name}")
         return True
     except Exception as e:
-        print(f"Failed to create GitHub repository {repo_name}: {e}")
+        if not quiet:
+            print(f"Failed to create GitHub repository {repo_name}: {e}")
         return False
 
 def get_gitlab_token() -> Optional[str]:
