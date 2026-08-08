@@ -110,6 +110,51 @@ class GitOperations:
             return False
 
     @staticmethod
+    def get_truncated_commits(repo_path: Path) -> List[str]:
+        """Commits where history genuinely stops.
+
+        git reports a repository as shallow for as long as its `shallow` file is
+        non-empty, and nothing ever prunes that file: once later fetches have
+        filled the history in, the entries linger and every shallow check keeps
+        answering yes. Only an entry whose parent objects are actually absent
+        truncates anything, so read the raw commit objects (which bypasses the
+        grafting that hides those parents) and keep the entries that still bite.
+        """
+        try:
+            repo = git.Repo(repo_path)
+            shallow_file = Path(repo_path) / repo.git.rev_parse('--git-path', 'shallow')
+            if not shallow_file.exists():
+                return []
+
+            truncated = []
+            for sha in shallow_file.read_text().split():
+                raw = repo.git.cat_file('commit', sha)
+                parents = [line.split()[1] for line in raw.splitlines()
+                           if line.startswith('parent ')]
+                for parent in parents:
+                    try:
+                        repo.git.cat_file('-e', parent)
+                    except git.exc.GitCommandError:
+                        truncated.append(sha)
+                        break
+
+            return truncated
+        except Exception as e:
+            print(f"Error determining truncated history: {e}")
+            return []
+
+    @staticmethod
+    def refs_containing(repo_path: Path, commit: str, ref_prefix: str) -> List[str]:
+        """Refs below ref_prefix that have commit in their history."""
+        try:
+            repo = git.Repo(repo_path)
+            output = repo.git.for_each_ref('--format=%(refname)', '--contains', commit, ref_prefix)
+            return [line for line in output.splitlines() if line]
+        except Exception as e:
+            print(f"Error finding refs containing {commit}: {e}")
+            return []
+
+    @staticmethod
     def unshallow_repo(repo_path: Path) -> bool:
         """Unshallow a repository if it's shallow."""
         try:
@@ -138,16 +183,84 @@ class GitOperations:
             print(f"Error adding remote {remote_name}: {e}")
             return False
 
+    # Namespace for mirroring bookkeeping refs, so that a remote's tags can be
+    # tracked per remote instead of being merged into the local refs/tags/*.
+    MIRROR_STATE_NAMESPACE = "refs/mirror-state"
+
     @staticmethod
-    def fetch_remote(repo_path: Path, remote_name: str) -> bool:
+    def fetch_remote(repo_path: Path, remote_name: str, prune: bool = False,
+                     refspec: Optional[str] = None) -> bool:
         try:
             repo = git.Repo(repo_path)
             remote = repo.remote(remote_name)
-            remote.fetch()
+            kwargs = {}
+            if prune:
+                kwargs['prune'] = True
+            if refspec:
+                remote.fetch(refspec=refspec, force=True, **kwargs)
+            else:
+                remote.fetch(**kwargs)
             return True
         except Exception as e:
             print(f"Error fetching from {remote_name}: {e}")
             return False
+
+    @staticmethod
+    def fetch_remote_tags(repo_path: Path, remote_name: str) -> bool:
+        """Fetch a remote's tags into a per-remote namespace."""
+        namespace = GitOperations._tag_namespace(remote_name)
+        return GitOperations.fetch_remote(repo_path, remote_name, prune=True,
+                                          refspec=f"+refs/tags/*:{namespace}/*")
+
+    @staticmethod
+    def _tag_namespace(remote_name: str) -> str:
+        return f"{GitOperations.MIRROR_STATE_NAMESPACE}/{remote_name}/tags"
+
+    @staticmethod
+    def remote_tag_ref(remote_name: str, tag_name: str) -> str:
+        """Ref holding a remote's copy of a tag, requires fetch_remote_tags()."""
+        return f"{GitOperations._tag_namespace(remote_name)}/{tag_name}"
+
+    @staticmethod
+    def _ref_shas(repo_path: Path, prefix: str) -> Dict[str, str]:
+        """Map ref names below prefix to the object they point at."""
+        try:
+            repo = git.Repo(repo_path)
+            output = repo.git.for_each_ref('--format=%(refname)%09%(objectname)', prefix)
+        except Exception as e:
+            print(f"Error listing refs below {prefix}: {e}")
+            return {}
+
+        shas = {}
+        for line in output.splitlines():
+            refname, _, sha = line.partition('\t')
+            name = refname[len(prefix) + 1:]
+            if name and name != 'HEAD':
+                shas[name] = sha
+        return shas
+
+    @staticmethod
+    def is_ancestor(repo_path: Path, commit: str, descendant: str) -> bool:
+        """Whether commit is reachable from descendant, i.e. a push would fast-forward."""
+        try:
+            repo = git.Repo(repo_path)
+            repo.git.merge_base('--is-ancestor', commit, descendant)
+            return True
+        except git.exc.GitCommandError:
+            return False
+        except Exception as e:
+            print(f"Error comparing {commit} and {descendant}: {e}")
+            return False
+
+    @staticmethod
+    def get_remote_branch_shas(repo_path: Path, remote_name: str) -> Dict[str, str]:
+        """Map remote branch names to their commit, from remote-tracking refs."""
+        return GitOperations._ref_shas(repo_path, f"refs/remotes/{remote_name}")
+
+    @staticmethod
+    def get_remote_tag_shas(repo_path: Path, remote_name: str) -> Dict[str, str]:
+        """Map a remote's tag names to their object, requires fetch_remote_tags()."""
+        return GitOperations._ref_shas(repo_path, GitOperations._tag_namespace(remote_name))
 
     @staticmethod
     def get_remote_branches(repo_path: Path, remote_name: str) -> List[str]:
@@ -182,64 +295,165 @@ class GitOperations:
             print(f"Error getting tags: {e}")
             return []
 
+    # A server that refuses an oversized pack reports it while unpacking, so the
+    # rejection names the receiving end rather than a size.
+    PACK_TOO_BIG_MARKERS = (
+        'unpack failed',
+        'index-pack failed',
+        'pack exceeds maximum allowed size',
+        'remote end hung up',
+        'early eof',
+        'the remote end hung up unexpectedly',
+        'http code = 413',
+    )
+
+    @staticmethod
+    def run_push(repo_path: Path, remote_name: str, refspec: str) -> tuple[bool, str]:
+        """Push one refspec, returning everything the remote said about it.
+
+        The interesting part of a rejection is the remote's own message, which
+        arrives on stderr and never reaches the per-ref status, so capture both
+        streams instead of inspecting the parsed result.
+        """
+        repo = git.Repo(repo_path)
+        status, stdout, stderr = repo.git.execute(
+            ['git', 'push', '--porcelain', remote_name, refspec],
+            with_extended_output=True, with_exceptions=False)
+
+        message = '\n'.join(part.strip() for part in (stdout, stderr) if part and part.strip())
+        rejected = any(line.startswith('!') for line in (stdout or '').splitlines())
+        return status == 0 and not rejected, message
+
+    @staticmethod
+    def is_pack_too_big(message: str) -> bool:
+        """Whether a push failure looks like the pack being too large to accept."""
+        lowered = (message or '').lower()
+        return any(marker in lowered for marker in GitOperations.PACK_TOO_BIG_MARKERS)
+
+    @staticmethod
+    def push_branch_in_chunks(repo_path: Path, source_remote: str, source_branch: str,
+                              dest_remote: str, dest_branch: str,
+                              on_progress=None) -> tuple[bool, str]:
+        """Advance a branch on the remote in chunks of history.
+
+        A single push has to be accepted as one pack, so a branch carrying more
+        history than the server will take can never go up in one attempt. Walk
+        it instead: push an intermediate commit, and the branch fast-forwards to
+        it, which shrinks what the next attempt has to carry. The chunk halves
+        on every rejection and doubles again after every success, so the walk
+        settles on a size the server accepts without rediscovering the limit
+        from scratch each time.
+        """
+        try:
+            repo = git.Repo(repo_path)
+            remote = repo.remote(dest_remote)
+            target = f'{source_remote}/{source_branch}'
+
+            # Only the commits the mirror is missing have to be walked.
+            try:
+                base = repo.git.rev_parse(f'{dest_remote}/{dest_branch}')
+                commit_range = f'{base}..{target}'
+            except git.exc.GitCommandError:
+                commit_range = target
+
+            # Topological order guarantees a commit's ancestors come before it,
+            # so pushing the commit at any position sends only what precedes it.
+            commits = repo.git.rev_list('--topo-order', '--reverse', commit_range).split()
+            if not commits:
+                return True, "Already up-to-date"
+
+            total = len(commits)
+            pushed = 0
+            chunk = total
+            rejected_size = None  # smallest chunk the remote has refused
+            pushes = 0
+            rejections = 0
+
+            while pushed < total:
+                attempt = min(chunk, total - pushed)
+                boundary = commits[pushed + attempt - 1]
+                pushes += 1
+
+                if on_progress:
+                    on_progress(pushed, total, attempt)
+
+                ok, failure = GitOperations.run_push(
+                    repo_path, dest_remote, f'{boundary}:refs/heads/{dest_branch}')
+
+                if ok:
+                    pushed += attempt
+                    # Reach further only while staying under the smallest size
+                    # the remote has already refused: a rejection costs a full
+                    # upload, so a size known to fail must never be retried.
+                    if rejected_size is None or chunk * 2 < rejected_size:
+                        chunk *= 2
+                    continue
+
+                if not GitOperations.is_pack_too_big(failure):
+                    return False, failure
+
+                if attempt <= 1:
+                    return False, f"single commit exceeds the remote's pack limit: {failure}"
+
+                rejections += 1
+                rejected_size = attempt
+                chunk = max(attempt // 2, 1)
+
+            return True, (f"{total} commits in {pushes - rejections} chunks "
+                          f"({rejections} rejected while finding the size)")
+
+        except Exception as e:
+            return False, str(e)
+
     @staticmethod
     def push_branch(repo_path: Path, source_remote: str, source_branch: str,
                    dest_remote: str, dest_branch: str) -> tuple[bool, str]:
         try:
             repo = git.Repo(repo_path)
-            remote = repo.remote(dest_remote)
             refspec = f'{source_remote}/{source_branch}:refs/heads/{dest_branch}'
+            ok, message = GitOperations.run_push(repo_path, dest_remote, refspec)
 
-            try:
-                # Try to push
-                push_infos = remote.push(refspec=refspec, progress=None)
+            if ok:
+                return True, "Already up-to-date" if 'up to date' in message.lower() else "Success"
 
-                # Check results
-                if push_infos:
-                    for info in push_infos:
-                        # Check for errors
-                        if info.flags & info.ERROR:
-                            if 'non-fast-forward' in str(info.summary).lower():
-                                # Get short SHA for tag
-                                try:
-                                    commit = repo.remote(source_remote).refs[source_branch].commit
-                                    short_sha = commit.hexsha[:7]
-                                    tag_name = f"{dest_branch}-{short_sha}"
-                                    return False, tag_name
-                                except:
-                                    return False, "non-fast-forward"
-                            return False, str(info.summary)
-                        # Check for up-to-date
-                        elif info.flags & info.UP_TO_DATE:
-                            return True, "Already up-to-date"
-                        # Otherwise it's likely successful
-                        elif info.flags & info.NEW_HEAD or info.flags & info.FAST_FORWARD:
-                            return True, "Success"
+            lowered = message.lower()
+            if 'non-fast-forward' in lowered or 'fetch first' in lowered:
+                # Report the name the diverged branch can be preserved under.
+                try:
+                    commit = repo.remote(source_remote).refs[source_branch].commit
+                    return False, f"{dest_branch}-{commit.hexsha[:7]}"
+                except Exception:
+                    return False, "non-fast-forward"
 
-                # If no specific flags, assume success
-                return True, "Success"
-
-            except git.exc.GitCommandError as e:
-                error_msg = str(e).lower()
-                if 'non-fast-forward' in error_msg:
-                    try:
-                        commit = repo.remote(source_remote).refs[source_branch].commit
-                        short_sha = commit.hexsha[:7]
-                        tag_name = f"{dest_branch}-{short_sha}"
-                        return False, tag_name
-                    except:
-                        return False, "non-fast-forward"
-                elif 'up-to-date' in error_msg or 'up to date' in error_msg:
-                    return True, "Already up-to-date"
-                else:
-                    return False, str(e)
+            return False, message
 
         except Exception as e:
             return False, f"Error: {str(e)}"
 
     @staticmethod
+    def push_tag_from_ref(repo_path: Path, source_ref: str, tag_name: str,
+                          remote_name: str) -> bool:
+        """Push an arbitrary ref to the remote as a tag.
+
+        Lets a mirror relay another remote's tags without creating them locally.
+        """
+        try:
+            repo = git.Repo(repo_path)
+            remote = repo.remote(remote_name)
+            push_infos = remote.push(refspec=f'{source_ref}:refs/tags/{tag_name}')
+
+            for info in push_infos:
+                if info.flags & info.ERROR:
+                    return False
+
+            return True
+        except Exception as e:
+            print(f"Error pushing tag {tag_name}: {e}")
+            return False
+
+    @staticmethod
     def push_tag(repo_path: Path, tag_name: str, remote_name: str) -> bool:
-        """Push a tag to remote repository."""
+        """Push a local tag to remote repository."""
         try:
             repo = git.Repo(repo_path)
             remote = repo.remote(remote_name)
