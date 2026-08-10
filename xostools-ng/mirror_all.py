@@ -20,7 +20,7 @@ import time
 from xos_common import (
     get_android_top, get_project_path, ManifestParser,
     GitOperations, ProjectInfo, get_github_token, create_github_repo,
-    console
+    console, forgejo_repo_ssh_url
 )
 
 # Global executor for signal handling
@@ -189,7 +189,7 @@ def analyze_repo(project: ProjectInfo, repo_revision: str, github_token: Optiona
 
     # Construct remote URLs and repo name
     project_name = get_project_path(project.path)
-    xos_url = f"git@git.halogenos.org:halogenOS/{project_name}"
+    xos_url = forgejo_repo_ssh_url(project_name)
     xosgh_url = f"git@github.com:halogenOS/{project_name}"
 
     # Create GitHub repo if needed and we have a token

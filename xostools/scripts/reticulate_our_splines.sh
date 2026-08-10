@@ -9,6 +9,13 @@ source build/envsetup.sh
 source external/xos/xostools/disable_git_prompts.sh
 source external/xos/xostools/includes.sh
 
+# The Forgejo service hosting the XOS repositories is configured once, in
+# includes.sh, which is sourced above.
+if [ -z "$XOS_FORGEJO_URL" ] || [ -z "$XOS_FORGEJO_OWNER" ] || [ -z "$XOS_FORGEJO_SSH_BASE" ]; then
+  echo "Forgejo settings are missing, expected them from external/xos/xostools/includes.sh" >&2
+  exit 1
+fi
+
 if [ -z "$ROM_REVISION" ]; then
   ROM_REVISION="$ROM_VERSION"
 fi
@@ -71,7 +78,7 @@ for path in ${list[@]}; do
     else
       # our own branch
       repo_upstream_rev="$repo_upstream_full"
-      repo_upstream="https://git.halogenos.org/halogenOS/$repo_name"
+      repo_upstream="$XOS_FORGEJO_URL/$XOS_FORGEJO_OWNER/$repo_name"
       echo "Our upstream $repo_upstream with rev $repo_upstream_rev"
       is_tag=false
     fi
@@ -107,9 +114,9 @@ for path in ${list[@]}; do
   fi
 
   if ! git ls-remote XOS >/dev/null 2>/dev/null; then
-    git remote add XOS https://git.halogenos.org/halogenOS/$repo_name ||
-      git remote set-url XOS https://git.halogenos.org/halogenOS/$repo_name
-    git remote set-url --push XOS git@git.halogenos.org:halogenOS/$repo_name
+    git remote add XOS "$XOS_FORGEJO_URL/$XOS_FORGEJO_OWNER/$repo_name" ||
+      git remote set-url XOS "$XOS_FORGEJO_URL/$XOS_FORGEJO_OWNER/$repo_name"
+    git remote set-url --push XOS "$XOS_FORGEJO_SSH_BASE:$XOS_FORGEJO_OWNER/$repo_name"
   fi
 
   if [[ $(git ls-remote XOS "${repo_revision}" 2>/dev/null | wc -l) -gt 0 ]]; then
@@ -118,7 +125,7 @@ for path in ${list[@]}; do
     continue
   fi
 
-  git remote set-url --push XOS git@git.halogenos.org:halogenOS/$repo_name
+  git remote set-url --push XOS "$XOS_FORGEJO_SSH_BASE:$XOS_FORGEJO_OWNER/$repo_name"
 
   echo "Setting upstream remote"
   git remote add upstream $repo_upstream || git remote set-url upstream $repo_upstream

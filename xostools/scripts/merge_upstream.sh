@@ -17,6 +17,13 @@ pushd $TOP
 
 source build/envsetup.sh
 
+# The Forgejo service hosting the XOS repositories is configured once, in
+# includes.sh, which build/envsetup.sh sources through the product setup.
+if [ -z "$XOS_FORGEJO_URL" ] || [ -z "$XOS_FORGEJO_OWNER" ]; then
+  echo "Forgejo settings are missing, expected them from external/xos/xostools/includes.sh" >&2
+  exit 1
+fi
+
 if [ "$1" != "--no-reset" ]; then
   reporeset
   reposync
@@ -43,7 +50,7 @@ while read path; do
   else
     # our own branch
     repo_upstream_rev="$repo_upstream_full"
-    repo_upstream="https://git.halogenos.org/halogenOS/$repo_name"
+    repo_upstream="$XOS_FORGEJO_URL/$XOS_FORGEJO_OWNER/$repo_name"
     echo "Our upstream $repo_upstream with rev $repo_upstream_rev"
     is_tag_or_commit=false
   fi

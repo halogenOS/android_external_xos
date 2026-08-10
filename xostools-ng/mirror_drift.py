@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report repository and ref drift between the XOS GitLab and GitHub mirrors."""
+"""Report repository and ref drift between the XOS Forgejo and GitHub mirrors."""
 
 import argparse
 import sys
@@ -8,8 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import gitlab
-from github import Github
+from github import Github, GithubException
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -23,18 +22,24 @@ from rich.text import Text
 
 from clean_mirror import CleanMirrorPlan, mirror_clean_plans
 from xos_common import (
+    FORGEJO_OWNER,
+    FORGEJO_URL,
     GITHUB_ORG,
-    GITLAB_GROUP_ID,
-    GITLAB_URL,
+    ForgejoClient,
     console,
+    get_forgejo_token,
     get_github_token,
-    get_gitlab_token,
+    repository_is_empty,
 )
 
 
 MAX_WORKERS = 10
-GITLAB_STYLE = "yellow"
+FORGEJO_STYLE = "yellow"
 GITHUB_STYLE = "cyan"
+
+# GitHub answers ref listings for a repository without commits with 409 rather
+# than with an empty list.
+GITHUB_EMPTY_REPOSITORY_STATUS = 409
 
 stop_event = threading.Event()
 
@@ -51,7 +56,7 @@ class RefState:
 class CommitDistance:
     """Commits reachable from only one side of a pair of refs."""
 
-    gitlab_only: int
+    forgejo_only: int
     github_only: int
 
 
@@ -81,30 +86,40 @@ class ComparisonUnavailable(RuntimeError):
 
 
 def ref_commit_sha(ref: Any) -> str:
-    """Read a commit SHA from a GitLab branch or tag object."""
-    commit = getattr(ref, "commit", None)
+    """Read a commit SHA from a Forgejo branch or tag payload."""
+    commit = ref.get("commit") if isinstance(ref, dict) else getattr(ref, "commit", None)
     if isinstance(commit, dict):
         sha = commit.get("id") or commit.get("sha")
     else:
         sha = getattr(commit, "id", None) or getattr(commit, "sha", None)
 
     if not sha:
-        raise ValueError(f"No commit SHA returned for ref {getattr(ref, 'name', '<unknown>')}")
+        name = ref.get("name") if isinstance(ref, dict) else getattr(ref, "name", None)
+        raise ValueError(f"No commit SHA returned for ref {name or '<unknown>'}")
     return sha
 
 
-def collect_gitlab_refs(project: Any) -> Tuple[Dict[str, RefState], Dict[str, RefState]]:
-    """Collect every branch and tag from a GitLab project."""
+def collect_forgejo_refs(
+    client: ForgejoClient, owner: str, name: str, empty: bool = False
+) -> Tuple[Dict[str, RefState], Dict[str, RefState]]:
+    """Collect every branch and tag from a Forgejo repository."""
+    if empty:
+        # Forgejo serves no ref endpoints for a repository without commits, so
+        # asking would report the whole repository as an incomplete comparison.
+        return {}, {}
+
     branches = {}
-    for branch in project.branches.list(iterator=True):
+    for branch in client.list_branches(name, owner=owner):
         commit_sha = ref_commit_sha(branch)
-        branches[branch.name] = RefState(commit_sha, commit_sha)
+        branches[branch["name"]] = RefState(commit_sha, commit_sha)
 
     tags = {}
-    for tag in project.tags.list(iterator=True):
+    for tag in client.list_tags(name, owner=owner):
+        # Forgejo reports the tag object in `id` and the commit it peels to in
+        # `commit.sha`; for a lightweight tag both are the same commit.
         commit_sha = ref_commit_sha(tag)
-        object_sha = getattr(tag, "target", None) or commit_sha
-        tags[tag.name] = RefState(object_sha, commit_sha)
+        object_sha = tag.get("id") or commit_sha
+        tags[tag["name"]] = RefState(object_sha, commit_sha)
 
     return branches, tags
 
@@ -112,16 +127,23 @@ def collect_gitlab_refs(project: Any) -> Tuple[Dict[str, RefState], Dict[str, Re
 def collect_github_refs(repository: Any) -> Tuple[Dict[str, RefState], Dict[str, RefState]]:
     """Collect every branch and tag from a GitHub repository."""
     branches = {}
-    for branch in repository.get_branches():
-        commit_sha = branch.commit.sha
-        branches[branch.name] = RefState(commit_sha, commit_sha)
+    try:
+        for branch in repository.get_branches():
+            commit_sha = branch.commit.sha
+            branches[branch.name] = RefState(commit_sha, commit_sha)
 
-    tag_commits = {tag.name: tag.commit.sha for tag in repository.get_tags()}
-    tag_objects = {}
-    if tag_commits:
-        for ref in repository.get_git_matching_refs("tags/"):
-            name = ref.ref.removeprefix("refs/tags/")
-            tag_objects[name] = ref.object.sha
+        tag_commits = {tag.name: tag.commit.sha for tag in repository.get_tags()}
+        tag_objects = {}
+        if tag_commits:
+            for ref in repository.get_git_matching_refs("tags/"):
+                name = ref.ref.removeprefix("refs/tags/")
+                tag_objects[name] = ref.object.sha
+    except GithubException as error:
+        # A repository the clean mirror has only just created carries no refs
+        # to compare, which is a state and not a failure.
+        if error.status == GITHUB_EMPTY_REPOSITORY_STATUS:
+            return {}, {}
+        raise
 
     tags = {}
     for name in set(tag_commits) | set(tag_objects):
@@ -131,28 +153,39 @@ def collect_github_refs(repository: Any) -> Tuple[Dict[str, RefState], Dict[str,
     return branches, tags
 
 
-def count_gitlab_commits(project: Any, from_sha: str, to_sha: str) -> int:
-    """Count commits reachable from to_sha but not from from_sha on GitLab."""
-    comparison = project.repository_compare(from_sha, to_sha, straight=True)
+def count_forgejo_commits(
+    client: ForgejoClient, owner: str, name: str, from_sha: str, to_sha: str
+) -> int:
+    """Count commits reachable from to_sha but not from from_sha on Forgejo."""
+    comparison = client.compare_commits(name, from_sha, to_sha, owner=owner)
+    if not isinstance(comparison, dict):
+        raise ComparisonUnavailable("Forgejo returned no comparison")
+
+    total = comparison.get("total_commits")
+    if isinstance(total, int):
+        return total
+
     commits = comparison.get("commits")
     if not isinstance(commits, list):
-        raise ComparisonUnavailable("GitLab returned no commit list")
+        raise ComparisonUnavailable("Forgejo returned no commit list")
     return len(commits)
 
 
-def compare_on_gitlab(project: Any, gitlab_sha: str, github_sha: str) -> CommitDistance:
-    """Compare two commits using objects available in the GitLab repository."""
+def compare_on_forgejo(
+    client: ForgejoClient, owner: str, name: str, forgejo_sha: str, github_sha: str
+) -> CommitDistance:
+    """Compare two commits using objects available in the Forgejo repository."""
     return CommitDistance(
-        gitlab_only=count_gitlab_commits(project, github_sha, gitlab_sha),
-        github_only=count_gitlab_commits(project, gitlab_sha, github_sha),
+        forgejo_only=count_forgejo_commits(client, owner, name, github_sha, forgejo_sha),
+        github_only=count_forgejo_commits(client, owner, name, forgejo_sha, github_sha),
     )
 
 
-def compare_on_github(repository: Any, gitlab_sha: str, github_sha: str) -> CommitDistance:
+def compare_on_github(repository: Any, forgejo_sha: str, github_sha: str) -> CommitDistance:
     """Compare two commits using objects available in the GitHub repository."""
-    comparison = repository.compare(gitlab_sha, github_sha)
+    comparison = repository.compare(forgejo_sha, github_sha)
     return CommitDistance(
-        gitlab_only=int(comparison.behind_by),
+        forgejo_only=int(comparison.behind_by),
         github_only=int(comparison.ahead_by),
     )
 
@@ -164,21 +197,23 @@ def concise_error(error: Exception) -> str:
 
 
 def compare_commits(
-    gitlab_project: Any,
+    client: ForgejoClient,
+    owner: str,
+    name: str,
     github_repository: Any,
-    gitlab_sha: str,
+    forgejo_sha: str,
     github_sha: str,
 ) -> CommitDistance:
     """Compare commits on the first service that still has both objects."""
     errors = []
 
     try:
-        return compare_on_gitlab(gitlab_project, gitlab_sha, github_sha)
+        return compare_on_forgejo(client, owner, name, forgejo_sha, github_sha)
     except Exception as error:
-        errors.append(f"GitLab: {concise_error(error)}")
+        errors.append(f"Forgejo: {concise_error(error)}")
 
     try:
-        return compare_on_github(github_repository, gitlab_sha, github_sha)
+        return compare_on_github(github_repository, forgejo_sha, github_sha)
     except Exception as error:
         errors.append(f"GitHub: {concise_error(error)}")
 
@@ -190,32 +225,32 @@ def compare_commits(
 
 def compare_ref_sets(
     kind: str,
-    gitlab_refs: Dict[str, RefState],
+    forgejo_refs: Dict[str, RefState],
     github_refs: Dict[str, RefState],
     compare: Callable[[str, str], CommitDistance],
 ) -> List[RefDrift]:
     """Return only the refs that are missing or differ."""
     drift = []
 
-    for name in sorted(set(gitlab_refs) | set(github_refs), key=str.casefold):
-        gitlab_ref = gitlab_refs.get(name)
+    for name in sorted(set(forgejo_refs) | set(github_refs), key=str.casefold):
+        forgejo_ref = forgejo_refs.get(name)
         github_ref = github_refs.get(name)
 
         if github_ref is None:
-            drift.append(RefDrift(kind, name, location="gitlab"))
+            drift.append(RefDrift(kind, name, location="forgejo"))
             continue
-        if gitlab_ref is None:
+        if forgejo_ref is None:
             drift.append(RefDrift(kind, name, location="github"))
             continue
-        if gitlab_ref == github_ref:
+        if forgejo_ref == github_ref:
             continue
 
-        if gitlab_ref.commit_sha == github_ref.commit_sha:
+        if forgejo_ref.commit_sha == github_ref.commit_sha:
             drift.append(RefDrift(kind, name, description="different tag object · same commit"))
             continue
 
         try:
-            distance = compare(gitlab_ref.commit_sha, github_ref.commit_sha)
+            distance = compare(forgejo_ref.commit_sha, github_ref.commit_sha)
             drift.append(RefDrift(kind, name, distance=distance))
         except ComparisonUnavailable as error:
             description = "unrelated" if str(error) == "unrelated histories" else "comparison unavailable"
@@ -231,56 +266,60 @@ def clean_mirror_candidates(refs: List[RefDrift]) -> Tuple[Tuple[str, ...], Tupl
 
     for ref in refs:
         if ref.kind == "tag":
-            if ref.location == "gitlab":
+            if ref.location == "forgejo":
                 tags.append(ref.name)
             continue
 
-        if ref.location == "gitlab":
+        if ref.location == "forgejo":
             branches.append(ref.name)
-        elif ref.distance and ref.distance.gitlab_only and not ref.distance.github_only:
+        elif ref.distance and ref.distance.forgejo_only and not ref.distance.github_only:
             branches.append(ref.name)
 
     return tuple(branches), tuple(tags)
 
 
 def compare_repository(
-    gl: gitlab.Gitlab,
-    gitlab_summary: Any,
+    client: ForgejoClient,
+    forgejo_summary: Dict,
     github_repository: Any,
 ) -> RepositoryDrift:
     """Fetch and compare all refs for one repository."""
-    name = gitlab_summary.path
+    name = forgejo_summary["name"]
+    owner = (forgejo_summary.get("owner") or {}).get("login") or FORGEJO_OWNER
 
     try:
-        gitlab_project = gl.projects.get(gitlab_summary.id)
-        gitlab_branches, gitlab_tags = collect_gitlab_refs(gitlab_project)
+        forgejo_branches, forgejo_tags = collect_forgejo_refs(
+            client, owner, name, empty=repository_is_empty(forgejo_summary)
+        )
         github_branches, github_tags = collect_github_refs(github_repository)
 
         distance_cache = {}
 
-        def compare(gitlab_sha: str, github_sha: str) -> CommitDistance:
-            key = (gitlab_sha, github_sha)
+        def compare(forgejo_sha: str, github_sha: str) -> CommitDistance:
+            key = (forgejo_sha, github_sha)
             if key not in distance_cache:
                 distance_cache[key] = compare_commits(
-                    gitlab_project,
+                    client,
+                    owner,
+                    name,
                     github_repository,
-                    gitlab_sha,
+                    forgejo_sha,
                     github_sha,
                 )
             return distance_cache[key]
 
-        refs = compare_ref_sets("branch", gitlab_branches, github_branches, compare)
-        refs.extend(compare_ref_sets("tag", gitlab_tags, github_tags, compare))
+        refs = compare_ref_sets("branch", forgejo_branches, github_branches, compare)
+        refs.extend(compare_ref_sets("tag", forgejo_tags, github_tags, compare))
         return RepositoryDrift(name=name, refs=refs)
     except Exception as error:
         return RepositoryDrift(name=name, error=concise_error(error))
 
 
-def project_index(projects: List[Any], name_attribute: str) -> Dict[str, Any]:
+def project_index(projects: List[Any], name_of: Callable[[Any], str]) -> Dict[str, Any]:
     """Index projects by their case-insensitive repository name."""
     indexed = {}
     for project in projects:
-        name = getattr(project, name_attribute)
+        name = name_of(project)
         key = name.casefold()
         if key in indexed:
             raise ValueError(f"Duplicate repository name after case folding: {name}")
@@ -288,23 +327,23 @@ def project_index(projects: List[Any], name_attribute: str) -> Dict[str, Any]:
     return indexed
 
 
-def render_project_presence(gitlab_only: List[str], github_only: List[str]):
+def render_project_presence(forgejo_only: List[str], github_only: List[str]):
     """Render repositories that exist on only one service."""
     heading = Text("PROJECTS", style="bold")
-    heading.append(f"   GL-only {len(gitlab_only)}", style=GITLAB_STYLE)
+    heading.append(f"   FJ-only {len(forgejo_only)}", style=FORGEJO_STYLE)
     heading.append(f"   GH-only {len(github_only)} hidden", style=GITHUB_STYLE)
     console.print(heading)
 
-    for name in gitlab_only:
-        line = Text("  GL  ", style=f"bold {GITLAB_STYLE}")
+    for name in forgejo_only:
+        line = Text("  FJ  ", style=f"bold {FORGEJO_STYLE}")
         line.append(name)
         console.print(line)
 
 
 def distance_text(drift: RefDrift) -> Text:
     """Format one compact, color-coded ref status."""
-    if drift.location == "gitlab":
-        return Text("GL only", style=GITLAB_STYLE)
+    if drift.location == "forgejo":
+        return Text("FJ only", style=FORGEJO_STYLE)
     if drift.description:
         style = "red" if drift.error else "yellow"
         return Text(drift.description, style=style)
@@ -312,19 +351,19 @@ def distance_text(drift: RefDrift) -> Text:
     distance = drift.distance
     if distance is None:
         return Text("different", style="red")
-    if distance.gitlab_only and not distance.github_only:
+    if distance.forgejo_only and not distance.github_only:
         text = Text("GH", style=f"bold {GITHUB_STYLE}")
-        text.append(f" behind {distance.gitlab_only}")
+        text.append(f" behind {distance.forgejo_only}")
         return text
-    if distance.github_only and not distance.gitlab_only:
-        text = Text("GL", style=f"bold {GITLAB_STYLE}")
+    if distance.github_only and not distance.forgejo_only:
+        text = Text("FJ", style=f"bold {FORGEJO_STYLE}")
         text.append(f" behind {distance.github_only}")
         return text
-    if not distance.gitlab_only and not distance.github_only:
+    if not distance.forgejo_only and not distance.github_only:
         return Text("different commits", style="yellow")
 
-    text = Text("GL", style=f"bold {GITLAB_STYLE}")
-    text.append(f" +{distance.gitlab_only}", style=GITLAB_STYLE)
+    text = Text("FJ", style=f"bold {FORGEJO_STYLE}")
+    text.append(f" +{distance.forgejo_only}", style=FORGEJO_STYLE)
     text.append(" · ", style="dim")
     text.append("GH", style=f"bold {GITHUB_STYLE}")
     text.append(f" +{distance.github_only}", style=GITHUB_STYLE)
@@ -386,7 +425,7 @@ def render_repository_drift(results: List[RepositoryDrift]):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Report repository, branch, and tag drift between GitLab and GitHub"
+        description="Report repository, branch, and tag drift between Forgejo and GitHub"
     )
     parser.add_argument(
         "--workers",
@@ -411,20 +450,23 @@ def main():
         console.print("[red]Error:[/red] --workers must be at least 1")
         return 1
 
-    gitlab_token = get_gitlab_token()
+    forgejo_token = get_forgejo_token()
     github_token = get_github_token()
-    if not gitlab_token:
-        console.print("[red]Error:[/red] GitLab token not found at ~/.creds/xos_gitlab_token")
+    if not forgejo_token:
+        console.print(
+            "[red]Error:[/red] Forgejo token not found; set XOS_FORGEJO_TOKEN "
+            "or create ~/.creds/xos_forgejo_token"
+        )
         return 1
     if not github_token:
         console.print("[red]Error:[/red] GitHub token not found at ~/.creds/xos_github_token")
         return 1
 
     try:
-        console.print(f"[cyan]Connecting to GitLab at {GITLAB_URL}...[/cyan]")
-        gl = gitlab.Gitlab(GITLAB_URL, private_token=gitlab_token)
-        gl.auth()
-        group = gl.groups.get(GITLAB_GROUP_ID)
+        console.print(f"[cyan]Connecting to Forgejo at {FORGEJO_URL}...[/cyan]")
+        client = ForgejoClient(token=forgejo_token)
+        client.authenticated_user()
+        client.get_organization(FORGEJO_OWNER)
 
         console.print(f"[cyan]Connecting to GitHub organization {GITHUB_ORG}...[/cyan]")
         github = Github(github_token)
@@ -432,25 +474,23 @@ def main():
         organization = github.get_organization(GITHUB_ORG)
 
         console.print("[cyan]Discovering repositories...[/cyan]")
-        gitlab_projects = list(
-            group.projects.list(include_subgroups=False, with_shared=False, iterator=True)
-        )
+        forgejo_projects = client.list_organization_repositories(FORGEJO_OWNER)
         github_repositories = list(organization.get_repos(type="all"))
 
-        gitlab_by_name = project_index(gitlab_projects, "path")
-        github_by_name = project_index(github_repositories, "name")
+        forgejo_by_name = project_index(forgejo_projects, lambda project: project["name"])
+        github_by_name = project_index(github_repositories, lambda repository: repository.name)
     except Exception as error:
         console.print(f"[red]Error:[/red] {concise_error(error)}")
         return 1
 
-    gitlab_only_keys = sorted(set(gitlab_by_name) - set(github_by_name))
-    github_only_keys = sorted(set(github_by_name) - set(gitlab_by_name))
-    paired_keys = sorted(set(gitlab_by_name) & set(github_by_name))
+    forgejo_only_keys = sorted(set(forgejo_by_name) - set(github_by_name))
+    github_only_keys = sorted(set(github_by_name) - set(forgejo_by_name))
+    paired_keys = sorted(set(forgejo_by_name) & set(github_by_name))
 
-    gitlab_only = [gitlab_by_name[key].path for key in gitlab_only_keys]
+    forgejo_only = [forgejo_by_name[key]["name"] for key in forgejo_only_keys]
     github_only = [github_by_name[key].name for key in github_only_keys]
-    if gitlab_only or github_only:
-        render_project_presence(gitlab_only, github_only)
+    if forgejo_only or github_only:
+        render_project_presence(forgejo_only, github_only)
 
     results = []
     with Progress(
@@ -468,8 +508,8 @@ def main():
             futures = {
                 executor_pool.submit(
                     compare_repository,
-                    gl,
-                    gitlab_by_name[key],
+                    client,
+                    forgejo_by_name[key],
                     github_by_name[key],
                 ): key
                 for key in paired_keys
@@ -482,24 +522,24 @@ def main():
                 except Exception as error:
                     results.append(
                         RepositoryDrift(
-                            name=gitlab_by_name[key].path,
+                            name=forgejo_by_name[key]["name"],
                             error=concise_error(error),
                         )
                     )
                 progress.update(task, advance=1)
 
     incomplete = render_repository_drift(results)
-    has_drift = bool(gitlab_only or github_only or any(result.refs for result in results))
+    has_drift = bool(forgejo_only or github_only or any(result.refs for result in results))
     mirror_errors = 0
 
     if args.clean_mirror:
         plans = [
             CleanMirrorPlan(
-                project_name=gitlab_by_name[key].path,
+                project_name=forgejo_by_name[key]["name"],
                 all_refs=True,
                 create_github_repository=True,
             )
-            for key in gitlab_only_keys
+            for key in forgejo_only_keys
         ]
 
         for result in results:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import math
 import os
 import sys
 import signal
@@ -10,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass
 import git
+import requests
 from github import Github, GithubException
 from rich.console import Console
 import fcntl
@@ -17,11 +19,367 @@ import time
 import re
 from rapidfuzz import fuzz
 from datetime import datetime, timedelta
+from urllib.parse import quote
 
 # Configuration constants (configurable through environment variables)
-GITLAB_URL = os.environ.get('XOS_GITLAB_URL', 'https://git.halogenos.org')
-GITLAB_GROUP_ID = int(os.environ.get('XOS_GITLAB_GROUP_ID', '108'))  # halogenOS group ID
+FORGEJO_URL = os.environ.get('XOS_FORGEJO_URL', 'https://git.halogenos.org')
+FORGEJO_OWNER = os.environ.get('XOS_FORGEJO_OWNER', 'halogenOS')
+FORGEJO_SSH_BASE = os.environ.get('XOS_FORGEJO_SSH_BASE', 'git@git.halogenos.org')
 GITHUB_ORG = os.environ.get('XOS_GITHUB_ORG', 'halogenOS')
+
+# Forgejo serves its REST API below this prefix and never paginates more than
+# 50 entries per request, no matter what a client asks for.
+FORGEJO_API_PREFIX = '/api/v1'
+FORGEJO_MAX_PAGE_LIMIT = 50
+
+
+FORGEJO_DEFAULT_TIMEOUT = 30.0
+FORGEJO_MAX_TIMEOUT = 600.0
+
+
+def _forgejo_timeout_from_environment() -> float:
+    """Read the bounded HTTP timeout, ignoring unusable overrides."""
+    raw = os.environ.get('XOS_FORGEJO_TIMEOUT')
+    if raw is None:
+        return FORGEJO_DEFAULT_TIMEOUT
+    try:
+        timeout = float(raw)
+    except ValueError:
+        return FORGEJO_DEFAULT_TIMEOUT
+    # float() also accepts "nan" and "inf", which no comparison rejects and
+    # which requests refuses with a plain ValueError instead of a transport
+    # error, so anything that is not a positive finite number falls back.
+    if not math.isfinite(timeout) or timeout <= 0:
+        return FORGEJO_DEFAULT_TIMEOUT
+    return min(timeout, FORGEJO_MAX_TIMEOUT)
+
+
+FORGEJO_TIMEOUT = _forgejo_timeout_from_environment()
+
+
+def forgejo_repo_url(repo_name: str, owner: Optional[str] = None,
+                     base_url: Optional[str] = None) -> str:
+    """Return the HTTPS clone/browse URL of an XOS repository."""
+    base = (base_url or FORGEJO_URL).rstrip('/')
+    return f"{base}/{owner or FORGEJO_OWNER}/{repo_name}"
+
+
+def forgejo_repo_ssh_url(repo_name: str, owner: Optional[str] = None,
+                         ssh_base: Optional[str] = None) -> str:
+    """Return the SSH push URL of an XOS repository."""
+    base = (ssh_base or FORGEJO_SSH_BASE).rstrip('/:')
+    return f"{base}:{owner or FORGEJO_OWNER}/{repo_name}"
+
+
+def get_forgejo_token() -> Optional[str]:
+    """Read the Forgejo token from the environment or the credentials file."""
+    token = os.environ.get('XOS_FORGEJO_TOKEN')
+    if token and token.strip():
+        return token.strip()
+
+    token_path = Path.home() / ".creds" / "xos_forgejo_token"
+    try:
+        with open(token_path, 'r') as f:
+            token = f.read().strip()
+        return token or None
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        console.print(f"[yellow]Error reading Forgejo token: {e}[/yellow]")
+        return None
+
+
+class ForgejoError(RuntimeError):
+    """An error returned by the Forgejo API or by the transport below it."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None,
+                 method: Optional[str] = None, path: Optional[str] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.method = method
+        self.path = path
+
+
+class ForgejoClient:
+    """Minimal Forgejo REST client shared by the XOS tools.
+
+    The client owns one `requests.Session` per thread: sessions are documented
+    as not thread-safe, and every caller here fans out over a thread pool, so a
+    single shared session would interleave connection state across workers.
+    """
+
+    def __init__(self, base_url: Optional[str] = None, token: Optional[str] = None,
+                 timeout: Optional[float] = None):
+        self.base_url = (base_url or FORGEJO_URL).rstrip('/')
+        self.token = token
+        self.timeout = FORGEJO_TIMEOUT if timeout is None else timeout
+        self._sessions = threading.local()
+
+    @property
+    def api_url(self) -> str:
+        return f"{self.base_url}{FORGEJO_API_PREFIX}"
+
+    @property
+    def session(self) -> requests.Session:
+        """Return the session belonging to the calling thread."""
+        session = getattr(self._sessions, 'session', None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({'Accept': 'application/json'})
+            if self.token:
+                session.headers['Authorization'] = f"token {self.token}"
+            self._sessions.session = session
+        return session
+
+    @staticmethod
+    def _segment(value: str) -> str:
+        """Percent-encode one path segment so names with slashes stay intact."""
+        return quote(str(value), safe='')
+
+    def _describe_error(self, response: requests.Response) -> str:
+        """Turn an error response into one short, readable message."""
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+        message = None
+        if isinstance(payload, dict):
+            message = payload.get('message') or payload.get('error') or payload.get('errors')
+        if not message:
+            message = (response.text or '').strip()
+        message = " ".join(str(message).split())
+        if len(message) > 300:
+            message = message[:300] + "…"
+        return f"HTTP {response.status_code}: {message}" if message else f"HTTP {response.status_code}"
+
+    def request(self, method: str, path: str, params: Optional[Dict] = None,
+                json_body: Optional[Dict] = None,
+                expected: Tuple[int, ...] = ()) -> requests.Response:
+        """Perform one API call and raise ForgejoError on failure."""
+        url = f"{self.api_url}/{path.lstrip('/')}"
+        try:
+            response = self.session.request(
+                method, url, params=params, json=json_body, timeout=self.timeout
+            )
+        except requests.RequestException as error:
+            raise ForgejoError(str(error), method=method, path=path) from error
+
+        if expected:
+            if response.status_code not in expected:
+                raise ForgejoError(
+                    self._describe_error(response),
+                    status_code=response.status_code,
+                    method=method,
+                    path=path,
+                )
+        elif response.status_code >= 400:
+            raise ForgejoError(
+                self._describe_error(response),
+                status_code=response.status_code,
+                method=method,
+                path=path,
+            )
+        return response
+
+    def get_json(self, path: str, params: Optional[Dict] = None):
+        """Perform a GET and decode the JSON body."""
+        response = self.request('GET', path, params=params)
+        return self._decode(response, 'GET', path)
+
+    @staticmethod
+    def _decode(response: requests.Response, method: str, path: str):
+        if response.status_code == 204 or not response.content:
+            return None
+        try:
+            return response.json()
+        except ValueError as error:
+            raise ForgejoError(
+                f"Malformed JSON response: {error}",
+                status_code=response.status_code,
+                method=method,
+                path=path,
+            ) from error
+
+    def paginate(self, path: str, params: Optional[Dict] = None,
+                 limit: int = FORGEJO_MAX_PAGE_LIMIT) -> List:
+        """Collect every page of a list endpoint.
+
+        Forgejo caps `limit` server side, so a page shorter than the requested
+        size is the only reliable end-of-list signal; some endpoints wrap the
+        list in `{"data": [...]}` instead of returning a bare array.
+        """
+        page_size = max(1, min(limit, FORGEJO_MAX_PAGE_LIMIT))
+        collected: List = []
+        page = 1
+
+        while True:
+            query = dict(params or {})
+            query.update({'page': page, 'limit': page_size})
+            payload = self.get_json(path, params=query)
+
+            if payload is None:
+                break
+            if isinstance(payload, dict):
+                payload = payload.get('data') or []
+            if not isinstance(payload, list):
+                raise ForgejoError(
+                    f"Expected a list from {path}, got {type(payload).__name__}",
+                    method='GET',
+                    path=path,
+                )
+
+            collected.extend(payload)
+            if len(payload) < page_size:
+                break
+            page += 1
+
+        return collected
+
+    # -- Users and organizations ------------------------------------------
+
+    def authenticated_user(self) -> Dict:
+        """Return the user the token belongs to (the authentication check)."""
+        return self.get_json('user')
+
+    def get_organization(self, owner: Optional[str] = None) -> Dict:
+        """Return one organization."""
+        return self.get_json(f"orgs/{self._segment(owner or FORGEJO_OWNER)}")
+
+    def list_organization_repositories(self, owner: Optional[str] = None) -> List[Dict]:
+        """Return every repository owned by an organization."""
+        return self.paginate(f"orgs/{self._segment(owner or FORGEJO_OWNER)}/repos")
+
+    # -- Repositories ------------------------------------------------------
+
+    def get_repository(self, name: str, owner: Optional[str] = None) -> Dict:
+        """Return one repository."""
+        return self.get_json(
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/{self._segment(name)}"
+        )
+
+    def repository_exists(self, name: str, owner: Optional[str] = None) -> bool:
+        """Whether a repository is already present."""
+        try:
+            self.get_repository(name, owner)
+            return True
+        except ForgejoError as error:
+            if error.status_code == 404:
+                return False
+            raise
+
+    def create_repository(self, name: str, owner: Optional[str] = None,
+                          private: bool = False, auto_init: bool = False,
+                          description: Optional[str] = None) -> Dict:
+        """Create a repository inside an organization."""
+        body: Dict = {'name': name, 'private': private, 'auto_init': auto_init}
+        if description is not None:
+            body['description'] = description
+        response = self.request(
+            'POST',
+            f"orgs/{self._segment(owner or FORGEJO_OWNER)}/repos",
+            json_body=body,
+        )
+        return self._decode(response, 'POST', 'repos')
+
+    def edit_repository(self, name: str, owner: Optional[str] = None, **fields) -> Dict:
+        """Change repository settings such as `default_branch` or `private`."""
+        response = self.request(
+            'PATCH',
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/{self._segment(name)}",
+            json_body=dict(fields),
+        )
+        return self._decode(response, 'PATCH', 'repos')
+
+    # -- Refs --------------------------------------------------------------
+
+    def list_branches(self, name: str, owner: Optional[str] = None) -> List[Dict]:
+        """Return every branch of a repository."""
+        return self.paginate(
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/{self._segment(name)}/branches"
+        )
+
+    def list_tags(self, name: str, owner: Optional[str] = None) -> List[Dict]:
+        """Return every tag of a repository."""
+        return self.paginate(
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/{self._segment(name)}/tags"
+        )
+
+    def compare_commits(self, name: str, base: str, head: str,
+                        owner: Optional[str] = None) -> Dict:
+        """Compare two revisions, returning commits reachable only from head."""
+        basehead = f"{self._segment(base)}...{self._segment(head)}"
+        return self.get_json(
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/"
+            f"{self._segment(name)}/compare/{basehead}"
+        )
+
+    # -- Webhooks ----------------------------------------------------------
+
+    def list_hooks(self, name: str, owner: Optional[str] = None) -> List[Dict]:
+        """Return every webhook configured on a repository."""
+        return self.paginate(
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/{self._segment(name)}/hooks"
+        )
+
+    def create_hook(self, name: str, target_url: str, owner: Optional[str] = None,
+                    events: Optional[List[str]] = None, active: bool = True,
+                    content_type: str = 'json', hook_type: str = 'forgejo') -> Dict:
+        """Create a push webhook on a repository."""
+        body = {
+            'type': hook_type,
+            'config': {'url': target_url, 'content_type': content_type},
+            'events': list(events or ['push']),
+            'active': active,
+        }
+        response = self.request(
+            'POST',
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/{self._segment(name)}/hooks",
+            json_body=body,
+        )
+        return self._decode(response, 'POST', 'hooks')
+
+    def delete_hook(self, name: str, hook_id: int, owner: Optional[str] = None):
+        """Delete one webhook from a repository."""
+        self.request(
+            'DELETE',
+            f"repos/{self._segment(owner or FORGEJO_OWNER)}/"
+            f"{self._segment(name)}/hooks/{self._segment(hook_id)}",
+        )
+
+
+def repository_display_name(repository: Dict) -> str:
+    """Full owner/name of a repository, falling back to the bare name."""
+    return repository.get("full_name") or repository.get("name") or "<unknown>"
+
+
+def repository_is_empty(repository: Dict) -> bool:
+    """Whether a repository has no commits yet.
+
+    Forgejo answers `/branches` and `/tags` with 404 for such a repository
+    instead of an empty list, so every caller has to skip listing its refs.
+    """
+    return bool(repository.get("empty"))
+
+
+def hook_target_url(hook: Dict) -> Optional[str]:
+    """Read the delivery URL of a Forgejo webhook.
+
+    Older Forgejo releases only report the URL inside `config`; newer ones also
+    expose it at the top level, so read both.
+    """
+    config = hook.get('config')
+    if isinstance(config, dict):
+        url = config.get('url')
+        if url:
+            return url
+    return hook.get('url')
+
+
+def forgejo_client(token: Optional[str] = None) -> ForgejoClient:
+    """Build a client from the configured credentials."""
+    return ForgejoClient(token=token if token is not None else get_forgejo_token())
+
 
 @dataclass
 class GitRemote:
@@ -634,18 +992,6 @@ def create_github_repo(repo_name: str, github_token: str,
             print(f"Failed to create GitHub repository {repo_name}: {e}")
         return False
 
-def get_gitlab_token() -> Optional[str]:
-    """Read GitLab token from credentials file."""
-    token_path = Path.home() / ".creds" / "xos_gitlab_token"
-    try:
-        with open(token_path, 'r') as f:
-            return f.read().strip()
-    except FileNotFoundError:
-        return None
-    except Exception as e:
-        console.print(f"[yellow]Error reading GitLab token: {e}[/yellow]")
-        return None
-
 def check_if_xos_repo_exists(repo_url: str, repo_path: Path) -> bool:
     """Check if XOS repository exists using git ls-remote."""
     try:
@@ -661,51 +1007,41 @@ def check_if_xos_repo_exists(repo_url: str, repo_path: Path) -> bool:
         return False
 
 def create_xos_repo(repo_name: str) -> bool:
-    """Create a XOS repository on the GitLab server using the API."""
+    """Create a XOS repository on the Forgejo server using the API."""
+    token = get_forgejo_token()
+    if not token:
+        console.print("[yellow]Warning: No Forgejo token found, cannot create repository[/yellow]")
+        return False
+
+    client = ForgejoClient(token=token)
     try:
-        import gitlab
-
-        gitlab_token = get_gitlab_token()
-        if not gitlab_token:
-            console.print("[yellow]Warning: No GitLab token found, cannot create repository[/yellow]")
-            return False
-
-        gl = gitlab.Gitlab(GITLAB_URL, private_token=gitlab_token)
-        gl.auth()
-
-        # Create the repository
-        project_data = {
-            'name': repo_name,
-            'namespace_id': GITLAB_GROUP_ID,
-            'visibility': 'public'
-        }
-
-        project = gl.projects.create(project_data)
-        console.print(f"[green]Created GitLab repository: {repo_name}[/green]")
+        client.create_repository(repo_name, private=False)
+        console.print(f"[green]Created Forgejo repository: {repo_name}[/green]")
         return True
-
-    except Exception as e:
-        error_str = str(e)
-        # Check if repo already exists
-        if "has already been taken" in error_str or "already been taken" in error_str:
+    except ForgejoError as e:
+        # Forgejo answers an existing name with 409 Conflict; treat that as done.
+        if e.status_code == 409 or "already exists" in str(e).lower():
             console.print(f"[cyan]Repository {repo_name} already exists[/cyan]")
             return True
-        console.print(f"[red]Failed to create GitLab repository {repo_name}: {e}[/red]")
+        console.print(f"[red]Failed to create Forgejo repository {repo_name}: {e}[/red]")
+        return False
+    except Exception as e:
+        console.print(f"[red]Failed to create Forgejo repository {repo_name}: {e}[/red]")
         return False
 
 def create_xos(repo_name: str) -> bool:
     """
-    Create XOS repository on GitLab and/or GitHub depending on available tokens.
+    Create XOS repository on Forgejo and/or GitHub depending on available tokens.
 
     Returns True if at least one repository was created (or already exists).
     """
     created_anywhere = False
 
-    # Try GitLab
-    if get_gitlab_token():
+    # Try Forgejo
+    if get_forgejo_token():
         if create_xos_repo(repo_name):
             created_anywhere = True
-    # else: GitLab token not available, skipping (expected in some environments)
+    # else: Forgejo token not available, skipping (expected in some environments)
 
     # Try GitHub
     github_token = get_github_token()

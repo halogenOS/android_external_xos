@@ -1,4 +1,4 @@
-"""Safely mirror non-conflicting GitLab refs to GitHub."""
+"""Safely mirror non-conflicting Forgejo refs to GitHub."""
 
 import shutil
 import threading
@@ -27,6 +27,7 @@ from xos_common import (
     GitOperations,
     console,
     create_github_repo,
+    forgejo_repo_ssh_url,
     get_android_top,
     get_project_path,
 )
@@ -34,7 +35,7 @@ from xos_common import (
 
 @dataclass(frozen=True)
 class CleanMirrorPlan:
-    """Refs that can move toward GitLab without discarding GitHub history."""
+    """Refs that can move toward Forgejo without discarding GitHub history."""
 
     project_name: str
     branches: Tuple[str, ...] = ()
@@ -59,7 +60,7 @@ class CleanMirrorResult:
 
 @dataclass(frozen=True)
 class PreparedSourceRefs:
-    """Fetched GitLab refs selected by one mirror plan."""
+    """Fetched Forgejo refs selected by one mirror plan."""
 
     repo_path: Path
     branches: Tuple[str, ...]
@@ -111,9 +112,9 @@ def concise_git_message(message: str, limit: int = 300) -> str:
 
 
 def repository_urls(project_name: str) -> Tuple[str, str]:
-    """Return the GitLab source and GitHub destination SSH URLs."""
+    """Return the Forgejo source and GitHub destination SSH URLs."""
     return (
-        f"git@git.halogenos.org:halogenOS/{project_name}",
+        forgejo_repo_ssh_url(project_name),
         f"git@github.com:{GITHUB_ORG}/{project_name}",
     )
 
@@ -188,7 +189,7 @@ def cache_repository(
         check_cancelled(cancel_event)
         note = None if attempt == 1 else f"retry {attempt}/3"
         if on_status:
-            on_status("cloning GitLab", note)
+            on_status("cloning Forgejo", note)
         try:
             git.Repo.clone_from(source_url, repo_path, bare=True, multi_options=["--no-tags"])
             check_cancelled(cancel_event)
@@ -203,7 +204,7 @@ def cache_repository(
             if attempt < 3:
                 wait_before_retry(cancel_event, attempt)
     raise RuntimeError(
-        f"Cloning GitLab failed after 3 attempts: {concise_git_message(last_error)}"
+        f"Cloning Forgejo failed after 3 attempts: {concise_git_message(last_error)}"
     )
 
 
@@ -213,21 +214,21 @@ def configure_and_fetch_source(
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ):
-    """Configure and fetch the complete GitLab source state."""
+    """Configure and fetch the complete Forgejo source state."""
     check_cancelled(cancel_event)
     source_url, _ = repository_urls(project_name)
 
     if not GitOperations.add_remote(repo_path, "xos", source_url, quiet=True):
-        raise RuntimeError("Failed to add the GitLab remote")
+        raise RuntimeError("Failed to add the Forgejo remote")
     retry_operation(
         lambda: GitOperations.fetch_remote_with_result(repo_path, "xos", prune=True),
-        "fetching GitLab branches",
+        "fetching Forgejo branches",
         on_status,
         cancel_event=cancel_event,
     )
     retry_operation(
         lambda: GitOperations.fetch_remote_tags_with_result(repo_path, "xos"),
-        "fetching GitLab tags",
+        "fetching Forgejo tags",
         on_status,
         cancel_event=cancel_event,
     )
@@ -294,7 +295,7 @@ def prepare_source_refs(
     on_status: Optional[Callable[[str, Optional[str]], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> PreparedSourceRefs:
-    """Fetch GitLab and resolve the refs selected by a mirror plan."""
+    """Fetch Forgejo and resolve the refs selected by a mirror plan."""
     configure_and_fetch_source(
         repo_path, plan.project_name, on_status, cancel_event
     )
@@ -313,7 +314,7 @@ def prepare_source_refs(
     missing = [f"branch {name}" for name in branches if name not in source_branches]
     missing.extend(f"tag {name}" for name in tags if name not in source_tags)
     if missing:
-        raise RuntimeError(f"GitLab refs disappeared: {', '.join(missing)}")
+        raise RuntimeError(f"Forgejo refs disappeared: {', '.join(missing)}")
 
     if on_status:
         on_status("checking source history", None)
@@ -362,7 +363,7 @@ def push_branch(
     on_note: Optional[Callable[[Optional[str]], None]] = None,
     cancel_event: Optional[threading.Event] = None,
 ) -> str:
-    """Push a branch only when GitHub can fast-forward to GitLab."""
+    """Push a branch only when GitHub can fast-forward to Forgejo."""
     check_cancelled(cancel_event)
     source_sha = refs.source_branches[branch]
     destination_sha = refs.destination_branches.get(branch)

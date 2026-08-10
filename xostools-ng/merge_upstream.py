@@ -38,7 +38,8 @@ from xos_common import (
     run_repo_command,
     generate_manifest,
     cleanup_manifest,
-    truncate_project_name
+    truncate_project_name,
+    forgejo_repo_url
 )
 
 # Global stop event for graceful shutdown
@@ -102,7 +103,7 @@ def parse_upstream_config(upstream_full: str, repo_name: str) -> UpstreamConfig:
         return UpstreamConfig(upstream_url, upstream_rev, is_tag_or_commit)
     else:
         # Internal halogenOS repository
-        upstream_url = f"https://git.halogenos.org/halogenOS/{repo_name}"
+        upstream_url = forgejo_repo_url(repo_name)
         return UpstreamConfig(upstream_url, upstream_full, False)
 
 

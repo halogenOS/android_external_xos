@@ -39,7 +39,9 @@ from xos_common import (
     handle_lfs_cleanup,
     safe_add_or_update_remote,
     truncate_project_name,
-    create_xos
+    create_xos,
+    forgejo_repo_url,
+    forgejo_repo_ssh_url
 )
 
 # Global stop event for graceful shutdown
@@ -197,8 +199,8 @@ def perform_single_reticulation(
             return SplineResult(project_name, False, "repository has unstaged changes or untracked files, cannot proceed")
 
         # Set up XOS remote
-        xos_url = f"https://git.halogenos.org/halogenOS/{task.project.name}"
-        xos_push_url = f"git@git.halogenos.org:halogenOS/{task.project.name}"
+        xos_url = forgejo_repo_url(task.project.name)
+        xos_push_url = forgejo_repo_ssh_url(task.project.name)
 
         xos_remote = safe_add_or_update_remote(repo, 'XOS', xos_url)
         # Set push URL using git command directly
@@ -482,7 +484,7 @@ class SplineReticulator:
                     else:
                         # Internal halogenOS repository
                         upstream_rev = upstream_full
-                        upstream_url = f"https://git.halogenos.org/halogenOS/{name}"
+                        upstream_url = forgejo_repo_url(name)
 
                 project_info = ProjectInfo(path, name, remote)
                 project_path = self.top / path

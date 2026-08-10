@@ -40,7 +40,7 @@ from xos_common import (
     setup_tracked_project_branch,
     is_project_tracked_in_xos,
     get_xos_target_branch_for_tracked_project,
-    GITLAB_URL
+    forgejo_repo_url
 )
 
 # Global stop event for graceful shutdown
@@ -419,7 +419,7 @@ class BranchMerger:
                     else:
                         # Internal halogenOS repository
                         upstream_rev = upstream_full
-                        upstream_url = f"{GITLAB_URL}/halogenOS/{name}"
+                        upstream_url = forgejo_repo_url(name)
 
                 # Also check if upstream_rev indicates this is a tag
                 if upstream_rev and upstream_rev.startswith('refs/tags/'):

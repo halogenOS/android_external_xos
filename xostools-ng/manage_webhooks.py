@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
 """
-Manage GitLab webhooks for all repositories in a group.
+Manage Forgejo webhooks for all repositories in an organization.
 Ensures each repository has exactly one push webhook with the specified URL.
 """
 
 import sys
 import argparse
-from pathlib import Path
 from urllib.parse import urlparse
-import gitlab
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
-from xos_common import get_gitlab_token, console, GITLAB_URL, GITLAB_GROUP_ID
+from typing import Dict, List
+from xos_common import (
+    FORGEJO_OWNER,
+    FORGEJO_URL,
+    ForgejoClient,
+    console,
+    get_forgejo_token,
+    hook_target_url,
+    repository_display_name,
+)
 
 # Configuration
 MAX_WORKERS = 10  # Number of concurrent threads
@@ -30,7 +36,6 @@ stats = {
 
 @dataclass
 class ProcessResult:
-    project_id: int
     project_name: str
     status: str  # 'added', 'removed', 'skipped', 'error'
     message: str
@@ -40,72 +45,78 @@ class ProcessResult:
 
 def is_push_webhook(webhook_url: str) -> bool:
     """Check if a webhook URL ends with /push."""
-    return webhook_url.rstrip('/').endswith('/push')
+    return bool(webhook_url) and webhook_url.rstrip('/').endswith('/push')
 
-def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: str,
-                           target_url: str, pbar: tqdm) -> ProcessResult:
-    """Process webhooks for a single project."""
+
+def delivers_push_events(webhook: Dict) -> bool:
+    """Whether a hook would actually deliver the pushes we need.
+
+    A disabled hook, or one subscribed to other events, points at the right URL
+    without ever firing, so it cannot stand in for the hook this tool
+    guarantees. Fields the server does not report are not held against a hook,
+    so an unexpected payload shape never causes delete-and-recreate churn.
+    """
+    if not webhook.get('active', True):
+        return False
+    events = webhook.get('events')
+    return events is None or 'push' in events
+
+def process_project_webhooks(client: ForgejoClient, owner: str, repository_name: str,
+                             project_name: str, target_url: str, pbar: tqdm) -> ProcessResult:
+    """Process webhooks for a single repository."""
     try:
-        # Get full project details
-        project = gl.projects.get(project_id)
-
-        # Get all webhooks for this project
-        webhooks = list(project.hooks.list(iterator=True))
+        # Get all webhooks for this repository
+        webhooks = client.list_hooks(repository_name, owner=owner)
 
         # Track actions taken
         webhooks_removed = 0
         webhook_exists = False
         webhook_added = False
 
-        # Check existing webhooks
+        # Check existing webhooks. Exactly one hook may deliver our pushes, so
+        # keep the first usable one and remove every other push hook: a stale
+        # URL, a disabled or non-push hook on our URL, and duplicates of our
+        # own hook left behind by a concurrent run.
         for webhook in webhooks:
-            if is_push_webhook(webhook.url):
-                if webhook.url == target_url:
-                    # Correct webhook already exists
-                    webhook_exists = True
-                else:
-                    # Wrong push webhook, remove it
-                    try:
-                        webhook.delete()
-                        webhooks_removed += 1
-                    except Exception as e:
-                        pbar.update(1)
-                        with counter_lock:
-                            stats['errors'] += 1
-                        return ProcessResult(
-                            project_id=project_id,
-                            project_name=project_name,
-                            status='error',
-                            message=f'Failed to remove webhook: {e}'
-                        )
+            existing_url = hook_target_url(webhook)
+            if not is_push_webhook(existing_url):
+                continue
+
+            if (existing_url == target_url and delivers_push_events(webhook)
+                    and not webhook_exists):
+                webhook_exists = True
+                continue
+
+            try:
+                client.delete_hook(repository_name, webhook['id'], owner=owner)
+                webhooks_removed += 1
+            except Exception as e:
+                pbar.update(1)
+                with counter_lock:
+                    stats['errors'] += 1
+                return ProcessResult(
+                    project_name=project_name,
+                    status='error',
+                    message=f'Failed to remove webhook: {e}'
+                )
 
         # Add webhook if needed
         if not webhook_exists:
             try:
                 # Create new webhook with push events for all branches
-                project.hooks.create({
-                    'url': target_url,
-                    'push_events': True,
-                    'push_events_branch_filter': '',  # Empty string means all branches
-                    'enable_ssl_verification': True,
-                    'token': '',  # No secret token
-                    'issues_events': False,
-                    'merge_requests_events': False,
-                    'wiki_page_events': False,
-                    'tag_push_events': False,
-                    'note_events': False,
-                    'job_events': False,
-                    'pipeline_events': False,
-                    'deployment_events': False,
-                    'releases_events': False
-                })
+                client.create_hook(
+                    repository_name,
+                    target_url,
+                    owner=owner,
+                    events=['push'],
+                    active=True,
+                )
                 webhook_added = True
             except Exception as e:
                 pbar.update(1)
                 with counter_lock:
                     stats['errors'] += 1
                 return ProcessResult(
-                    project_id=project_id,
                     project_name=project_name,
                     status='error',
                     message=f'Failed to add webhook: {e}',
@@ -133,7 +144,6 @@ def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: s
 
         pbar.update(1)
         return ProcessResult(
-            project_id=project_id,
             project_name=project_name,
             status=status,
             message=message,
@@ -146,7 +156,6 @@ def process_project_webhooks(gl: gitlab.Gitlab, project_id: int, project_name: s
         with counter_lock:
             stats['errors'] += 1
         return ProcessResult(
-            project_id=project_id,
             project_name=project_name,
             status='error',
             message=str(e)
@@ -164,7 +173,7 @@ def main():
     """Main function to process all repositories."""
     # Parse command line arguments
     parser = argparse.ArgumentParser(
-        description='Manage GitLab webhooks for all repositories in a group'
+        description='Manage Forgejo webhooks for all repositories in an organization'
     )
     parser.add_argument(
         'webhook_url',
@@ -187,43 +196,47 @@ def main():
         print("Error: Invalid URL format")
         sys.exit(1)
 
-    # Initialize GitLab connection
-    token = get_gitlab_token()
+    # Initialize Forgejo connection
+    token = get_forgejo_token()
     if not token:
-        console.print("[red]Error: GitLab token not found. Make sure ~/.creds/xos_gitlab_token exists.[/red]")
+        console.print(
+            "[red]Error: Forgejo token not found. Set XOS_FORGEJO_TOKEN or "
+            "create ~/.creds/xos_forgejo_token.[/red]"
+        )
         sys.exit(1)
 
-    gl = gitlab.Gitlab(GITLAB_URL, private_token=token)
+    client = ForgejoClient(token=token)
 
     try:
-        gl.auth()
-    except gitlab.exceptions.GitlabAuthenticationError:
-        console.print("[red]Error: Failed to authenticate with GitLab. Check your token.[/red]")
+        client.authenticated_user()
+    except Exception as error:
+        console.print(f"[red]Error: Failed to authenticate with Forgejo: {error}[/red]")
         sys.exit(1)
 
-    console.print(f"Connected to GitLab at {GITLAB_URL}")
+    console.print(f"Connected to Forgejo at {FORGEJO_URL}")
 
-    # Get the group
+    # Get the organization
     try:
-        group = gl.groups.get(GITLAB_GROUP_ID)
-    except gitlab.exceptions.GitlabGetError:
-        console.print(f"[red]Error: Could not find group with ID {GITLAB_GROUP_ID}[/red]")
+        organization = client.get_organization(FORGEJO_OWNER)
+    except Exception as error:
+        console.print(f"[red]Error: Could not find organization {FORGEJO_OWNER}: {error}[/red]")
         sys.exit(1)
 
-    console.print(f"Processing repositories in group: {group.name} (ID: {GITLAB_GROUP_ID})")
+    organization_name = organization.get('full_name') or organization.get('username') or FORGEJO_OWNER
+    console.print(f"Processing repositories in organization: {organization_name} ({FORGEJO_OWNER})")
     console.print(f"Target webhook URL: {args.webhook_url}")
     if args.dry_run:
         console.print("[blue]DRY RUN MODE - No changes will be made[/blue]")
     console.print(f"Using {MAX_WORKERS} concurrent workers")
     console.print()
 
-    # First, collect all projects
-    console.print("Fetching project list...")
-    projects = list(tqdm(
-        group.projects.list(include_subgroups=False, iterator=True),
-        desc="Discovering projects",
-        unit="projects"
-    ))
+    # First, collect all repositories
+    console.print("Fetching repository list...")
+    try:
+        projects = client.list_organization_repositories(FORGEJO_OWNER)
+    except Exception as error:
+        console.print(f"[red]Error: Could not list repositories: {error}[/red]")
+        sys.exit(1)
 
     total_projects = len(projects)
     console.print(f"\nFound {total_projects} projects to process")
@@ -232,7 +245,7 @@ def main():
     if args.dry_run:
         console.print("Would process the following projects:")
         for project in projects[:10]:  # Show first 10 as example
-            console.print(f"  - {project.path_with_namespace}")
+            console.print(f"  - {repository_display_name(project)}")
         if len(projects) > 10:
             console.print(f"  ... and {len(projects) - 10} more")
         console.print("\nExiting dry run mode.")
@@ -248,9 +261,10 @@ def main():
             future_to_project = {
                 executor.submit(
                     process_project_webhooks,
-                    gl,
-                    project.id,
-                    project.path_with_namespace,
+                    client,
+                    (project.get("owner") or {}).get("login") or FORGEJO_OWNER,
+                    project.get("name"),
+                    repository_display_name(project),
                     args.webhook_url,
                     pbar
                 ): project

@@ -27,7 +27,7 @@
             gitpython
             lxml
             pygithub
-            python-gitlab
+            requests
             rich
             rapidfuzz
             tqdm
@@ -204,9 +204,9 @@
           meta.mainProgram = pname;
         };
 
-        # GitLab branch setter script as a Python application
-        gitlab-branch-setter = python3Packages.buildPythonApplication rec {
-          pname = "gitlab-branch-setter";
+        # Forgejo branch setter script as a Python application
+        forgejo-branch-setter = python3Packages.buildPythonApplication rec {
+          pname = "forgejo-branch-setter";
           version = "1.0";
 
           src = ./.;
@@ -249,9 +249,9 @@
         };
 
 
-        # GitLab webhook manager script as a Python application
-        gitlab-webhook-manager = python3Packages.buildPythonApplication rec {
-          pname = "gitlab-webhook-manager";
+        # Forgejo webhook manager script as a Python application
+        forgejo-webhook-manager = python3Packages.buildPythonApplication rec {
+          pname = "forgejo-webhook-manager";
           version = "1.0";
 
           src = ./.;
@@ -342,6 +342,34 @@
           meta.mainProgram = pname;
         };
 
+        # Interpreter carrying every runtime dependency the test suite imports
+        pythonTestEnv = python3Packages.python.withPackages (ps: with ps; [
+          pytest
+          gitpython
+          lxml
+          pygithub
+          requests
+          rich
+          rapidfuzz
+          tqdm
+          packaging
+          beautifulsoup4
+        ]);
+
+        # Offline unit tests: everything is mocked, nothing touches a service
+        pytestCheck = pkgs.runCommand "xostools-ng-pytest"
+          {
+            nativeBuildInputs = [ pythonTestEnv ];
+          }
+          ''
+            cp -r ${./.} source
+            chmod -R u+w source
+            cd source
+            export HOME="$TMPDIR"
+            pytest -q tests
+            touch $out
+          '';
+
         # Development shell
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
@@ -355,7 +383,6 @@
             lxml
             rich
             pygithub
-            python-gitlab
             requests
             beautifulsoup4
             rapidfuzz
@@ -374,15 +401,15 @@
             echo ""
             echo "Available scripts:"
             echo "  python mirror_all.py        - Mirror repositories"
-            echo "  python mirror_drift.py      - Report GitLab and GitHub mirror drift"
+            echo "  python mirror_drift.py      - Report Forgejo and GitHub mirror drift"
             echo "  python create_snapshot.py   - Create snapshot tags"
             echo "  python merge_upstream.py    - Merge upstream changes"
             echo "  python reticulate_splines.py - Reticulate splines (create branches from upstream)"
             echo "  python fetch_bulletin.py    - Fetch Android security bulletins as JSON"
             echo "  python cherry_pick_bulletin.py - Cherry-pick security patches from bulletins"
-            echo "  python set_default_branches.py - Set default branches for GitLab repositories"
+            echo "  python set_default_branches.py - Set default branches for Forgejo repositories"
             echo "  python set_default_branches_github.py - Set default branches for GitHub repositories"
-            echo "  python manage_webhooks.py   - Manage GitLab webhooks for repositories"
+            echo "  python manage_webhooks.py   - Manage Forgejo webhooks for repositories"
             echo "  python merge_branches.py    - Merge branches across all repositories"
             echo "  python verify_bulletin.py   - Verify security patches from bulletins"
             echo ""
@@ -402,9 +429,9 @@
           fetch-bulletin = fetch-bulletin;
           cherry-pick-bulletin = cherry-pick-bulletin;
           xos-common = xos-common;
-          gitlab-branch-setter = gitlab-branch-setter;
+          forgejo-branch-setter = forgejo-branch-setter;
           github-branch-setter = github-branch-setter;
-          gitlab-webhook-manager = gitlab-webhook-manager;
+          forgejo-webhook-manager = forgejo-webhook-manager;
           list-changes = list-changes;
           merge-branches = merge-branches;
           verify-bulletin = verify-bulletin;
@@ -443,17 +470,17 @@
             type = "app";
             program = lib.getExe cherry-pick-bulletin;
           };
-          gitlab-branch-setter = {
+          forgejo-branch-setter = {
             type = "app";
-            program = lib.getExe gitlab-branch-setter;
+            program = lib.getExe forgejo-branch-setter;
           };
           github-branch-setter = {
             type = "app";
             program = lib.getExe github-branch-setter;
           };
-          gitlab-webhook-manager = {
+          forgejo-webhook-manager = {
             type = "app";
-            program = lib.getExe gitlab-webhook-manager;
+            program = lib.getExe forgejo-webhook-manager;
           };
           list-changes = {
             type = "app";
@@ -467,6 +494,10 @@
             type = "app";
             program = lib.getExe verify-bulletin;
           };
+        };
+
+        checks = {
+          pytest = pytestCheck;
         };
 
         devShells.default = devShell;

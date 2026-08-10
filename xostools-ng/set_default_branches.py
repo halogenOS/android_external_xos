@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Set default branches for all repositories in a GitLab group.
+Set default branches for all repositories in a Forgejo organization.
 Selects the latest available XOS-* branch as the default.
 Also ensures all repositories are public.
 """
@@ -8,14 +8,22 @@ Also ensures all repositories are public.
 import sys
 import signal
 from packaging import version
-import gitlab
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from dataclasses import dataclass
-from typing import Optional, List, Callable, Dict
+from typing import Optional, List, Callable, Dict, Iterable
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn, TaskID
 from rich.table import Table
-from xos_common import get_gitlab_token, console, GITLAB_URL, GITLAB_GROUP_ID, truncate_project_name
+from xos_common import (
+    FORGEJO_OWNER,
+    FORGEJO_URL,
+    ForgejoClient,
+    console,
+    get_forgejo_token,
+    repository_display_name,
+    repository_is_empty,
+    truncate_project_name,
+)
 
 # Configuration
 MAX_WORKERS = 10
@@ -42,7 +50,6 @@ signal.signal(signal.SIGINT, signal_handler)
 
 @dataclass
 class ProcessResult:
-    project_id: int
     project_name: str
     status: str  # 'updated', 'skipped', 'error'
     message: str
@@ -63,14 +70,24 @@ def parse_xos_version(branch_name):
         return None
 
 
-def select_latest_xos_branch(branches):
+def branch_names(branches: Iterable) -> List[str]:
+    """Read the names out of the Forgejo branch objects."""
+    names = []
+    for branch in branches:
+        name = branch.get("name") if isinstance(branch, dict) else getattr(branch, "name", None)
+        if name:
+            names.append(name)
+    return names
+
+
+def select_latest_xos_branch(names: Iterable[str]) -> Optional[str]:
     """Select the latest XOS branch from a list of branch names."""
     xos_branches = []
 
-    for branch in branches:
-        parsed_version = parse_xos_version(branch.name)
+    for name in names:
+        parsed_version = parse_xos_version(name)
         if parsed_version is not None:
-            xos_branches.append((branch.name, parsed_version))
+            xos_branches.append((name, parsed_version))
 
     if not xos_branches:
         return None
@@ -80,33 +97,57 @@ def select_latest_xos_branch(branches):
 
 
 def process_project(
-    gl: gitlab.Gitlab,
-    project_id: int,
+    client: ForgejoClient,
+    owner: str,
+    repository_name: str,
     project_name: str,
-    status_callback: Optional[StatusCallback] = None
+    status_callback: Optional[StatusCallback] = None,
+    cancel_event: Optional[threading.Event] = None
 ) -> ProcessResult:
-    """Process a single project and update its default branch if needed."""
+    """Process a single repository and update its default branch if needed."""
 
     def update_status(status: str, persistent: bool = False, advance: int = 0, add_steps: int = 0):
         if status_callback:
             status_callback(status, persistent, advance, add_steps)
 
+    def cancelled() -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def cancellation_result() -> ProcessResult:
+        update_status("[yellow]Cancelled[/yellow]", persistent=True)
+        return ProcessResult(
+            project_name=project_name,
+            status='skipped',
+            message='Cancelled'
+        )
+
     try:
-        # Get full project details
-        update_status("Fetching project details", add_steps=1)
-        full_project = gl.projects.get(project_id)
-        current_default = full_project.default_branch
+        # An interrupt has to stop this worker before it changes anything, so
+        # the cancellation is checked again right before the write below.
+        if cancelled():
+            return cancellation_result()
+
+        # Get full repository details
+        update_status("Fetching repository details", add_steps=1)
+        repository = client.get_repository(repository_name, owner=owner)
+        current_default = repository.get("default_branch")
+        is_private = bool(repository.get("private"))
         update_status("Got details", advance=1)
 
-        # Get all branches for this project
-        update_status("Listing branches", add_steps=1)
-        branches = list(full_project.branches.list(iterator=True))
-        update_status("Listed branches", advance=1)
+        # A repository without commits has no ref endpoints at all, so asking
+        # for its branches would fail the whole repository and leave it private.
+        if repository_is_empty(repository):
+            branches = []
+        else:
+            # Get all branches for this repository
+            update_status("Listing branches", add_steps=1)
+            branches = client.list_branches(repository_name, owner=owner)
+            update_status("Listed branches", advance=1)
 
         # Visibility is enforced independently of the default branch: a freshly
         # created repo (no branches, or no XOS branch yet) must still be made
-        # public, since a raw push creates GitLab projects private.
-        selected_branch = select_latest_xos_branch(branches) if branches else None
+        # public, since a raw push creates repositories private.
+        selected_branch = select_latest_xos_branch(branch_names(branches)) if branches else None
 
         needs_update = False
         changes = []
@@ -115,9 +156,9 @@ def process_project(
             needs_update = True
             changes.append(f'branch: {current_default} → {selected_branch}')
 
-        if full_project.visibility != 'public':
+        if is_private:
             needs_update = True
-            changes.append(f'visibility: {full_project.visibility} → public')
+            changes.append('visibility: private → public')
 
         if not needs_update:
             if not selected_branch:
@@ -126,7 +167,6 @@ def process_project(
             else:
                 update_status("[dim]Skipped - already correct[/dim]", persistent=True)
             return ProcessResult(
-                project_id=project_id,
                 project_name=project_name,
                 status='skipped',
                 message='Already set correctly',
@@ -134,19 +174,21 @@ def process_project(
                 new_branch=selected_branch
             )
 
+        if cancelled():
+            return cancellation_result()
+
         # Apply the changes. Only touch default_branch when we actually have a
         # branch to point at; visibility is always corrected when it's wrong.
         update_status("Saving changes", add_steps=1)
+        fields = {'private': False}
         if selected_branch:
-            full_project.default_branch = selected_branch
-        full_project.visibility = 'public'
-        full_project.save()
+            fields['default_branch'] = selected_branch
+        client.edit_repository(repository_name, owner=owner, **fields)
         update_status("Saved", advance=1)
 
         update_status(f"[green]Updated: {', '.join(changes)}[/green]", persistent=True)
 
         return ProcessResult(
-            project_id=project_id,
             project_name=project_name,
             status='updated',
             message=', '.join(changes),
@@ -157,7 +199,6 @@ def process_project(
     except Exception as e:
         update_status(f"[red]Error: {e}[/red]", persistent=True)
         return ProcessResult(
-            project_id=project_id,
             project_name=project_name,
             status='error',
             message=str(e)
@@ -168,36 +209,47 @@ def main():
     """Main function to process all repositories."""
     global executor
 
-    # Initialize GitLab connection
-    token = get_gitlab_token()
+    # Initialize Forgejo connection
+    token = get_forgejo_token()
     if not token:
-        console.print("[red]Error: GitLab token not found. Make sure ~/.creds/xos_gitlab_token exists.[/red]")
+        console.print(
+            "[red]Error: Forgejo token not found. Set XOS_FORGEJO_TOKEN or "
+            "create ~/.creds/xos_forgejo_token.[/red]"
+        )
         sys.exit(1)
 
-    console.print(f"[cyan]Connecting to GitLab at {GITLAB_URL}...[/cyan]")
-    gl = gitlab.Gitlab(GITLAB_URL, private_token=token)
+    console.print(f"[cyan]Connecting to Forgejo at {FORGEJO_URL}...[/cyan]")
+    client = ForgejoClient(token=token)
 
     try:
-        gl.auth()
-    except gitlab.exceptions.GitlabAuthenticationError:
-        console.print("[red]Error: Failed to authenticate with GitLab. Check your token.[/red]")
+        client.authenticated_user()
+    except Exception as error:
+        console.print(f"[red]Error: Failed to authenticate with Forgejo: {error}[/red]")
         sys.exit(1)
 
-    console.print(f"[green]✓[/green] Connected to GitLab")
+    console.print("[green]✓[/green] Connected to Forgejo")
 
-    # Get the group
-    console.print(f"[cyan]Fetching group {GITLAB_GROUP_ID}...[/cyan]")
+    # Get the organization
+    console.print(f"[cyan]Fetching organization {FORGEJO_OWNER}...[/cyan]")
     try:
-        group = gl.groups.get(GITLAB_GROUP_ID)
-    except gitlab.exceptions.GitlabGetError:
-        console.print(f"[red]Error: Could not find group with ID {GITLAB_GROUP_ID}[/red]")
+        organization = client.get_organization(FORGEJO_OWNER)
+    except Exception as error:
+        console.print(f"[red]Error: Could not find organization {FORGEJO_OWNER}: {error}[/red]")
         sys.exit(1)
 
-    console.print(f"[green]✓[/green] Group: [bold]{group.name}[/bold]")
+    console.print(
+        f"[green]✓[/green] Organization: "
+        f"[bold]{organization.get('full_name') or organization.get('username') or FORGEJO_OWNER}[/bold]"
+    )
 
-    # Fetch project list
-    console.print(f"[cyan]Fetching project list...[/cyan]")
-    projects = list(group.projects.list(include_subgroups=False, iterator=True))
+    # Fetch repository list
+    console.print("[cyan]Fetching repository list...[/cyan]")
+    try:
+        projects = client.list_organization_repositories(FORGEJO_OWNER)
+    except Exception as error:
+        console.print(f"[red]Error: Could not list repositories: {error}[/red]")
+        sys.exit(1)
+
     total_projects = len(projects)
     console.print(f"[green]✓[/green] Found [bold]{total_projects}[/bold] projects")
     console.print(f"[dim]Using {MAX_WORKERS} concurrent workers[/dim]\n")
@@ -261,6 +313,13 @@ def main():
 
         def run_task_with_status(project) -> ProcessResult:
             """Wrapper that assigns a slot, runs the task, and releases the slot."""
+            if stop_event.is_set():
+                return ProcessResult(
+                    project_name=repository_display_name(project),
+                    status='skipped',
+                    message='Cancelled'
+                )
+
             with worker_slots_lock:
                 if available_slots:
                     slot_id = available_slots.pop(0)
@@ -268,7 +327,8 @@ def main():
                     slot_id = 0
 
             task_id = worker_task_ids[slot_id]
-            project_display = truncate_project_name(project.path_with_namespace, max_len=40)
+            project_name = repository_display_name(project)
+            project_display = truncate_project_name(project_name, max_len=40)
             # Reset task start time for accurate per-task elapsed time
             progress.tasks[task_id].start_time = progress.get_time()
             progress.tasks[task_id].stop_time = None
@@ -280,14 +340,16 @@ def main():
                 visible=True
             )
 
-            status_callback = create_status_callback(project.path_with_namespace, slot_id)
+            status_callback = create_status_callback(project_name, slot_id)
 
             try:
                 result = process_project(
-                    gl,
-                    project.id,
-                    project.path_with_namespace,
-                    status_callback
+                    client,
+                    (project.get("owner") or {}).get("login") or FORGEJO_OWNER,
+                    project.get("name"),
+                    project_name,
+                    status_callback,
+                    stop_event
                 )
                 return result
             finally:
@@ -319,8 +381,7 @@ def main():
                 except Exception as e:
                     project = futures[future]
                     results.append(ProcessResult(
-                        project_id=project.id,
-                        project_name=project.path_with_namespace,
+                        project_name=repository_display_name(project),
                         status='error',
                         message=str(e)
                     ))
