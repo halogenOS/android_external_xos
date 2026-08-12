@@ -1031,26 +1031,20 @@ def create_xos_repo(repo_name: str) -> bool:
 
 def create_xos(repo_name: str) -> bool:
     """
-    Create XOS repository on Forgejo and/or GitHub depending on available tokens.
+    Create the XOS repository on Forgejo, and best-effort on GitHub.
 
-    Returns True if at least one repository was created (or already exists).
+    Returns True only if the Forgejo repository exists or was created.
+    Forgejo is the push target, so a GitHub-only success must not let a
+    caller continue into a push that cannot succeed.
     """
-    created_anywhere = False
+    forgejo_ok = create_xos_repo(repo_name)
 
-    # Try Forgejo
-    if get_forgejo_token():
-        if create_xos_repo(repo_name):
-            created_anywhere = True
-    # else: Forgejo token not available, skipping (expected in some environments)
-
-    # Try GitHub
+    # GitHub mirror is best-effort and does not gate the reticulation.
     github_token = get_github_token()
     if github_token:
-        if create_github_repo(repo_name, github_token):
-            created_anywhere = True
-    # else: GitHub token not available, skipping (expected in some environments)
+        create_github_repo(repo_name, github_token)
 
-    return created_anywhere
+    return forgejo_ok
 
 # Global console for shared use
 console = Console()
