@@ -58,16 +58,16 @@ createXos() {
   # here: only a 2xx creation and the 409 of an already existing repository
   # count as success, everything else (bad token, no permission, server
   # failure) has to fail loudly.
-  local response status body
+  local response http_code body
   response="$(curl -sS -w '\n%{http_code}' \
     -H "Authorization: token $token" \
     -H "Content-Type: application/json" \
     -X POST \
     --data "$payload" \
     "$XOS_FORGEJO_URL/api/v1/orgs/$XOS_FORGEJO_OWNER/repos")" || return 1
-  status="${response##*$'\n'}"
+  http_code="${response##*$'\n'}"
   body="${response%$'\n'*}"
-  case "$status" in
+  case "$http_code" in
     2??)
       echo "Created $project_to_create"
       ;;
@@ -75,7 +75,7 @@ createXos() {
       echo "Repository $project_to_create already exists"
       ;;
     *)
-      echo "Failed to create $project_to_create (HTTP $status): $body" >&2
+      echo "Failed to create $project_to_create (HTTP $http_code): $body" >&2
       return 1
       ;;
   esac
