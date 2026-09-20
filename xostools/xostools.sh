@@ -133,7 +133,7 @@ function build() {
                 # Now start building
                 echo "Using $THREAD_COUNT_BUILD threads for build."
                 if [ "$buildarg" != "mm" ]; then
-                    if [[ "$target" == *"sdk_phone_"* ]]; then
+                    if [[ "$target" == *"sdk_phone"* ]]; then
                         echob "Building for SDK phone"
                         [ "${module}" = "bacon" ] && module=''
                     fi
@@ -243,7 +243,7 @@ function emu() {
 
     if [ -z "$target" ]; then
         echo "Usage: emu <target> [skin]"
-        echo "  target: lunch target (e.g. aosp_sdk_phone_x86_64-bp4a-eng)"
+        echo "  target: lunch target (e.g. sdk_phone64_x86_64-cp2a-userdebug)"
         echo "  skin:   emulator skin resolution (default: 1080x2160)"
         echo ""
         echo "First run builds full images. Subsequent iterations:"
