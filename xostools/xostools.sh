@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (C) 2016-2023 The halogenOS Project
+# Copyright (C) 2016-2026 The halogenOS Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -117,8 +117,13 @@ function build() {
 
             full | module | mm)
                 echob "Starting build..."
-                [ -z "$module" ] && module="bacon" || \
+                local default_module=false
+                if [ -z "$module" ]; then
+                    module="otapackage"
+                    default_module=true
+                else
                     echo "You have decided to build $module"
+                fi
 		device=${target#*_}
 		device=${device%%-*}
                 eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
@@ -127,7 +132,7 @@ function build() {
                 # When signing post-build, build only the target-files
                 # directory + otatools (skip zipping the target-files since
                 # sign_build operates directly on the directory).
-                if [ "$buildarg" = "full" ] && [ "$module" = "bacon" ] && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
+                if [ "$buildarg" = "full" ] && $default_module && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
                     module="target-files-dir otatools"
                 fi
                 # Now start building
@@ -135,7 +140,7 @@ function build() {
                 if [ "$buildarg" != "mm" ]; then
                     if [[ "$target" == *"sdk_phone"* ]]; then
                         echob "Building for SDK phone"
-                        [ "${module}" = "bacon" ] && module=''
+                        $default_module && module=''
                     fi
                     m --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module || return $?
                 else
@@ -144,6 +149,8 @@ function build() {
 
                 if [ "$buildarg" = "full" ] && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
                     sign_build || return $?
+                elif [ "$buildarg" != "mm" ] && $default_module && [ "$module" = "otapackage" ] && [[ "$KEYS_DIR" != /* ]]; then
+                    name_ota_package || return $?
                 fi
             ;;
 
@@ -221,13 +228,18 @@ function sign_build() {
     sign_target_files_apks "${sign_args[@]}" "$target_files_dir" "$target_files_dir" || return $?
 
     local custom_version
-    local product_build_prop="$target_files_dir/PRODUCT/etc/build.prop"
-    [ -f "$product_build_prop" ] || product_build_prop="$target_files_dir/SYSTEM/product/etc/build.prop"
-    custom_version=$(grep -m1 ro.custom.version= "$product_build_prop" | cut -d= -f2)
+    custom_version=$(read_custom_version \
+        "$target_files_dir/PRODUCT/etc/build.prop" \
+        "$target_files_dir/SYSTEM/product/etc/build.prop")
+    if [ -z "$custom_version" ]; then
+        echo "No ro.custom.version found in the product build.prop in $target_files_dir" >&2
+        return 1
+    fi
     local signed_ota="${OUT}/${custom_version}.zip"
 
     echob "Generating signed OTA package..."
     ota_from_target_files -k "$KEYS_DIR/releasekey" "$target_files_dir" "$signed_ota" || return $?
+    write_sha256sum "$signed_ota" || return $?
 
     if [ -f "$KEYS_DIR/avbkey_4096.pem" ]; then
         echob "Extracting AVB public key..."
@@ -235,6 +247,46 @@ function sign_build() {
     fi
 
     echob "Signed OTA: $signed_ota"
+}
+
+function name_ota_package() {
+    local product_name="$TARGET_PRODUCT"
+    [ "$TARGET_BUILD_TYPE" = "debug" ] && product_name="${product_name}_debug"
+    local ota_package="${OUT}/${product_name}-ota.zip"
+    if [ ! -f "$ota_package" ]; then
+        echo "No OTA package found at $ota_package" >&2
+        return 1
+    fi
+
+    local custom_version
+    custom_version=$(read_custom_version \
+        "$OUT/product/etc/build.prop" \
+        "$OUT/system/product/etc/build.prop")
+    if [ -z "$custom_version" ]; then
+        echo "No ro.custom.version found in the product build.prop in $OUT" >&2
+        return 1
+    fi
+    local named_ota="${OUT}/${custom_version}.zip"
+
+    echob "Naming OTA package..."
+    mv -f "$ota_package" "$named_ota" || return $?
+    write_sha256sum "$named_ota" || return $?
+
+    echob "OTA: $named_ota"
+}
+
+function read_custom_version() {
+    local build_prop="$1"
+    [ -f "$build_prop" ] || build_prop="$2"
+    [ -f "$build_prop" ] || return 0
+    grep -m1 ro.custom.version= "$build_prop" | cut -d= -f2
+}
+
+# The checksum line names the file without its directory
+function write_sha256sum() {
+    local sum
+    sum=$(cd "$(dirname "$1")" > /dev/null && sha256sum "$(basename "$1")") || return $?
+    echo "$sum" > "$1.sha256sum"
 }
 
 function emu() {

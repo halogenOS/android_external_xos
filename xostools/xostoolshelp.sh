@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# Copyright (C) 2016-2017 The halogenOS Project
+# Copyright (C) 2016-2026 The halogenOS Project
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,8 +22,14 @@ cat <<EOF
 Usage: build <target> [lunch target] [module] [noclean]
 
 Targets:
-    full        Full ROM (bacon). If KEYS_DIR is an absolute path,
-                the build is re-signed with release keys post-build.
+    full        Full ROM. Builds otapackage and names the OTA package
+                <custom version>.zip, with a sha256sum file beside it.
+                If KEYS_DIR is an absolute path, builds only the
+                target-files directory and the OTA tools instead, signs
+                the target-files directory in place with the release keys
+                and names the signed OTA package the same way.
+                SDK phone (emulator) targets build the default goal and
+                make no package, signed or not.
     sign        Re-sign the latest build with release keys (requires lunch)
     module      Build only a specific module
     module-list Build multiple modules
