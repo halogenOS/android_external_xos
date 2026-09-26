@@ -116,42 +116,56 @@ function build() {
         case "$buildarg" in
 
             full | module | mm)
+                if [ "$buildarg" != "full" ] && [ -z "$module" ]; then
+                    if [ "$buildarg" = "mm" ]; then
+                        echo "No directory named. \"build full\" makes the package." >&2
+                    else
+                        echo "No module named. \"build full\" makes the package." >&2
+                    fi
+                    return 1
+                fi
                 echob "Starting build..."
-                local default_module=false
-                if [ -z "$module" ]; then
-                    module="otapackage"
-                    default_module=true
-                else
+                if [ -n "$module" ]; then
                     echo "You have decided to build $module"
                 fi
 		device=${target#*_}
 		device=${device%%-*}
                 eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
+                # Packaging mode, the only place that decides the make goals
+                # and the post-build step
+                local packaging goals=()
+                if [ "$buildarg" != "full" ] || [ -n "$module" ]; then
+                    packaging=none
+                    goals=("$module")
+                elif [[ "$target" == *"sdk_phone"* ]]; then
+                    packaging=none
+                elif [[ "$KEYS_DIR" = /* ]]; then
+                    # sign_build signs the target-files directory in place,
+                    # so neither the zipped target-files nor the unsigned
+                    # OTA package is needed
+                    packaging=sign
+                    goals=(target-files-dir otatools)
+                else
+                    packaging=name
+                    goals=(otapackage)
+                fi
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
-                # When signing post-build, build only the target-files
-                # directory + otatools (skip zipping the target-files since
-                # sign_build operates directly on the directory).
-                if [ "$buildarg" = "full" ] && $default_module && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
-                    module="target-files-dir otatools"
-                fi
                 # Now start building
                 echo "Using $THREAD_COUNT_BUILD threads for build."
-                if [ "$buildarg" != "mm" ]; then
-                    if [[ "$target" == *"sdk_phone"* ]]; then
-                        echob "Building for SDK phone"
-                        $default_module && module=''
-                    fi
-                    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module || return $?
+                if [ "$buildarg" != "mm" ] && [[ "$target" == *"sdk_phone"* ]]; then
+                    echob "Building for SDK phone"
+                fi
+                if [ "$buildarg" = "mm" ]; then
+                    mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${goals[@]}" || return $?
                 else
-                    mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG $module || return $?
+                    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${goals[@]}" || return $?
                 fi
 
-                if [ "$buildarg" = "full" ] && [[ "$KEYS_DIR" = /* ]] && [[ "$target" != *"sdk_phone"* ]]; then
-                    sign_build || return $?
-                elif [ "$buildarg" != "mm" ] && $default_module && [ "$module" = "otapackage" ] && [[ "$KEYS_DIR" != /* ]]; then
-                    name_ota_package || return $?
-                fi
+                case "$packaging" in
+                    sign) sign_build || return $? ;;
+                    name) name_ota_package || return $? ;;
+                esac
             ;;
 
             module-list)

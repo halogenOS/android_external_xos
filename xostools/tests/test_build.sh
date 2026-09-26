@@ -103,8 +103,19 @@ function not_called() {
     ! grep -q "^$1\( \|$\)" "$calls"
 }
 
+# Succeeds when the given line is the only call to m or mmma
+function only_build_call() {
+    [ "$(grep -E '^(m|mmma)( |$)' "$calls")" = "$1" ]
+}
+
 function contains() {
     [[ "$1" == *"$2"* ]]
+}
+
+# Succeeds when the text holds the third argument after the second
+function contains_after() {
+    local rest="${1#*"$2"}"
+    [ "$rest" != "$1" ] && [[ "$rest" == *"$3"* ]]
 }
 
 function not_contains() {
@@ -137,7 +148,8 @@ reset_case
 out="$tmp/out/aosp_dev"
 output=$(build full aosp_dev-cp2a-userdebug noclean 2>&1)
 check "unsigned build succeeds" [ $? -eq 0 ]
-check "unsigned build asks for otapackage only" called "m --skip-soong-tests otapackage"
+check "unsigned build asks for otapackage only" \
+    only_build_call "m --skip-soong-tests otapackage"
 check "unsigned build does not sign" not_called sign_target_files_apks
 check "unsigned package is renamed to the custom version" \
     renamed "$out/$version.zip" "$out/aosp_dev-ota.zip"
@@ -150,7 +162,8 @@ check "unsigned build prints the package path" \
 reset_case
 KEYS_DIR=keys build full aosp_dev-cp2a-userdebug noclean > /dev/null 2>&1
 check "relative KEYS_DIR build succeeds" [ $? -eq 0 ]
-check "relative KEYS_DIR build asks for otapackage only" called "m --skip-soong-tests otapackage"
+check "relative KEYS_DIR build asks for otapackage only" \
+    only_build_call "m --skip-soong-tests otapackage"
 check "relative KEYS_DIR build does not sign" not_called sign_target_files_apks
 check "relative KEYS_DIR package is renamed to the custom version" \
     renamed "$out/$version.zip" "$out/aosp_dev-ota.zip"
@@ -190,8 +203,8 @@ mkdir -p "$tmp/keys"
 target_files="$out/obj/PACKAGING/target_files_intermediates/aosp_dev-target_files"
 KEYS_DIR="$tmp/keys" build full aosp_dev-cp2a-userdebug noclean > /dev/null 2>&1
 check "signed build succeeds" [ $? -eq 0 ]
-check "signed build asks for the target-files directory and the OTA tools" \
-    called "m --skip-soong-tests target-files-dir otatools"
+check "signed build asks for the target-files directory and the OTA tools only" \
+    only_build_call "m --skip-soong-tests target-files-dir otatools"
 check "signed build does not ask for otapackage" [ ! -e "$out/aosp_dev-ota.zip" ]
 check "signed build signs the target-files directory in place" \
     called "sign_target_files_apks -o -d $tmp/keys $target_files $target_files"
@@ -228,17 +241,48 @@ check "signed build with no build.prop prints no file error" \
 check "signed build with no build.prop leaves no package" \
     no_packages_in "$out"
 
-# A module build with no module and an absolute KEYS_DIR neither signs nor
-# names a package
-reset_case
-mkdir -p "$tmp/keys"
-: > "$tmp/keys/releasekey.pk8"
-KEYS_DIR="$tmp/keys" build module aosp_dev-cp2a-userdebug noclean > /dev/null 2>&1
-check "module build with absolute KEYS_DIR succeeds" [ $? -eq 0 ]
-check "module build with absolute KEYS_DIR does not sign" \
-    not_called sign_target_files_apks
-check "module build with absolute KEYS_DIR names no package" \
-    no_packages_in "$out" "$out/aosp_dev-ota.zip"
+# module and mm with nothing named
+for buildarg in module mm; do
+    reset_case
+    [ "$buildarg" = "mm" ] && missing="directory" || missing="module"
+    output=$(build "$buildarg" aosp_dev-cp2a-userdebug noclean 2>&1)
+    check "$buildarg build with nothing named fails" [ $? -ne 0 ]
+    check "$buildarg build with nothing named names the missing $missing" \
+        contains "$output" "No $missing named."
+    check "$buildarg build with nothing named points at the full build" \
+        contains "$output" '"build full" makes the package.'
+    check "$buildarg build with nothing named stops before lunch" \
+        [ ! -s "$calls" ]
+done
+
+# Named module or directory, with and without an absolute KEYS_DIR. The
+# output directory holds a target-files directory and an OTA package from an
+# earlier build, so signing or naming would find something to work on.
+out="$tmp/out/aosp_dev"
+target_files="$out/obj/PACKAGING/target_files_intermediates/aosp_dev-target_files"
+for keys in "" "$tmp/keys"; do
+    for named in "module Settings" "mm packages/apps/Settings" "full Settings"; do
+        buildarg="${named%% *}"
+        name="${named#* }"
+        [ "$buildarg" = "mm" ] && tool=mmma || tool=m
+        label="$buildarg build of $name (KEYS_DIR '$keys')"
+        reset_case
+        mkdir -p "$tmp/keys" "$target_files/PRODUCT/etc" "$target_files/META"
+        : > "$tmp/keys/releasekey.pk8"
+        echo "ro.custom.version=$version" > "$target_files/PRODUCT/etc/build.prop"
+        mkdir -p "$out/product/etc"
+        echo "ro.custom.version=$version" > "$out/product/etc/build.prop"
+        printf 'unsigned-ota' > "$out/aosp_dev-ota.zip"
+        KEYS_DIR="$keys" build "$buildarg" aosp_dev-cp2a-userdebug "$name" noclean \
+            > /dev/null 2>&1
+        check "$label succeeds" [ $? -eq 0 ]
+        check "$label builds only what is named" \
+            only_build_call "$tool --skip-soong-tests $name"
+        check "$label does not sign" not_called sign_target_files_apks
+        check "$label makes no package" \
+            no_packages_in "$out" "$out/aosp_dev-ota.zip"
+    done
+done
 
 # SDK phone builds
 for keys in "" "$tmp/keys"; do
@@ -254,6 +298,20 @@ for keys in "" "$tmp/keys"; do
     check "SDK phone build makes no package (KEYS_DIR '$keys')" no_packages_in "$out"
 done
 
+# The SDK phone message follows the thread count on every build but mm
+for named in "full" "full Settings" "module Settings"; do
+    buildarg="${named%% *}"
+    name="${named#"$buildarg"}"
+    reset_case
+    output=$(build "$buildarg" sdk_phone64_x86_64-cp2a-userdebug $name noclean 2>&1)
+    check "SDK phone $named build prints the SDK phone message after the thread count" \
+        contains_after "$output" "Using auto threads for build." "Building for SDK phone"
+done
+reset_case
+output=$(build mm sdk_phone64_x86_64-cp2a-userdebug packages/apps/Settings noclean 2>&1)
+check "SDK phone mm build does not print the SDK phone message" \
+    not_contains "$output" "Building for SDK phone"
+
 # Help text
 help=$(xostools_help_build)
 check "build help names the unsigned OTA package" contains "$help" "otapackage"
@@ -262,6 +320,11 @@ check "build help says the signed flow signs the target-files directory" \
     contains "$help" "the target-files directory in place"
 check "build help says SDK phone targets make no package" \
     contains "$help" "SDK phone (emulator) targets build the default goal"
+help_one_line=$(tr -s ' \n' ' ' <<< "$help")
+check "build help says module needs a module name and makes no package" \
+    contains "$help_one_line" "Needs a module name and makes no package."
+check "build help says mm needs a directory and makes no package" \
+    contains "$help_one_line" "Needs a directory and makes no package."
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures check(s) failed" >&2

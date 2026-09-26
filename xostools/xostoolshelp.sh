@@ -31,10 +31,12 @@ Targets:
                 SDK phone (emulator) targets build the default goal and
                 make no package, signed or not.
     sign        Re-sign the latest build with release keys (requires lunch)
-    module      Build only a specific module
+    module      Build only the named module. Needs a module name and
+                makes no package.
     module-list Build multiple modules
     mm          Builds using mmma. Useful for frameworks or modules
-                which you want to build using mmma/mmm/
+                which you want to build using mmma/mmm/. Needs a
+                directory and makes no package.
 
 noclean: use this option to skip cleaning before building
          this is not accepted on module-list
