@@ -1,0 +1,830 @@
+siso: support build outputs outside the exec root
+
+When a build manifest named its outputs by absolute paths outside the
+exec root, for example an Android OUT_DIR on a different disk than the
+source tree, siso joined those absolute paths onto the exec root.
+hashfs.Update stored every updated output under a name like
+<exec root>/mnt/out/..., wrote that name into the journal, and tried to
+set the mtime of a file that does not exist. updateDeps failed to make
+the output relative to the working directory and returned before
+recording anything, so the deps log stayed empty and was recompacted to
+its 16-byte header on every start. The response file setup looked for
+the file at the joined path, did not find it, and reported an unexpected
+removal every time. Once deps were recorded, checkDeps refused every
+compile whose depfile named a header generated in such a build
+directory. The rule of the step set "remote" in the siso config, so the
+step carried a platform, and checkDeps treated it as a remote request
+that cannot hold an absolute path, even though no remote execution was
+configured and the step ran locally.
+
+Now such outputs are recorded under their own absolute path in the file
+system state, in the journal and in the deps log. A local step may
+depend on an absolute path outside the exec root: checkDeps checks that
+it exists like any other dependency and the deps log keeps it, so a
+change to a generated header rebuilds the steps that include it. A
+second build with nothing changed does no work, and the deps log and the
+recorded command hashes survive both a normal exit and a killed build.
+
+This change routes the remaining exec root joins through helpers that
+keep absolute paths as they are, which matches Path.FromWD: it already
+keeps paths outside the exec root absolute. In hashfs, Update, the
+symlink resolution in Entries and AddMissingOutput now use makeFullpath.
+In the build package, updateDeps keys the deps log by the absolute
+output path as written in the manifest, and the response file setup and
+teardown, the reproxy output permission fix and the input tree for
+non-local directories use a new absFromExecRoot helper. checkDeps keeps
+refusing absolute dependencies on steps that siso may run remotely,
+through remote execution, reproxy or a remote exec wrapper, as the new
+Builder.mayRunRemote reports. The change adds a hashfs unit test, unit
+tests of mayRunRemote and of that refusal, and two end-to-end tests
+with a build directory outside the exec root, one of them with a remote
+rule and a generated header. After a header change, the end-to-end
+tests check which outputs were rebuilt, not only how many steps ran.
+The nsjail sandbox is left as it is and still rejects absolute outputs.
+
+An Android tree built with an absolute OUT_DIR outside the source tree
+started every build from zero. The explain log blamed a missing deps
+log entry for every compile step and a missing command line for many
+other steps, and the siso log was full of paths with the exec root
+prefixed to the absolute out directory. With only the path joins fixed,
+the first build stopped early, with "absolute path in deps" on the
+compiles that include generated headers.
+
+Builds that keep the out directory on a separate disk become incremental
+again, and interrupted builds keep the work they finished. Builds whose
+build directory is inside the exec root behave as before, and builds
+with remote execution keep the relocatability check.
+
+Test: go test ./build/... ./hashfs/... ./execute/...
+  ./toolsupport/ninjautil/... ./subcmd/ninja/... (all passed)
+Test: new tests with the hashfs half reverted (the hashfs test and both
+  end-to-end tests failed)
+Test: new tests with the updateDeps half reverted (both end-to-end
+  tests failed)
+Test: new tests with the checkDeps change reverted (the generated
+  header test failed)
+Test: new tests with mayRunRemote always returning false (the
+  mayRunRemote and checkDeps unit tests failed)
+Test: ninja project with absolute out-of-root build dir, incl. kill -9 run
+Test: the same project with the soong siso config and clang compiles of
+  a generated header
+
+Base: https://chromium.googlesource.com/build
+  revision 342ffcda73fb0acb5666792b95c00efc32b47318 (siso v1.5.8, the
+  git_revision pinned in prebuilts/siso/siso.ensure)
+
+diff --git a/siso/build/builder.go b/siso/build/builder.go
+index 926fbffd..322dcca6 100644
+--- a/siso/build/builder.go
++++ b/siso/build/builder.go
+@@ -1219,10 +1219,16 @@ func (b *Builder) updateDeps(ctx context.Context, step *Step) error {
+ 		clog.Warningf(ctx, "update deps: no outputs")
+ 		return nil
+ 	}
+-	output, err := filepath.Rel(step.cmd.Dir, step.cmd.Outputs[0])
+-	if err != nil {
+-		clog.Warningf(ctx, "update deps: failed to get rel %s,%s: %v", step.cmd.Dir, step.cmd.Outputs[0], err)
+-		return nil
++	// deps log is keyed by the output path as written in the build
++	// manifest: cwd relative, or absolute if it is out of exec root.
++	output := step.cmd.Outputs[0]
++	if !filepath.IsAbs(output) {
++		var err error
++		output, err = filepath.Rel(step.cmd.Dir, output)
++		if err != nil {
++			clog.Warningf(ctx, "update deps: failed to get rel %s,%s: %v", step.cmd.Dir, step.cmd.Outputs[0], err)
++			return nil
++		}
+ 	}
+ 	fi, err := b.hashFS.Stat(ctx, step.cmd.ExecRoot, step.cmd.Outputs[0])
+ 	if err != nil {
+diff --git a/siso/build/deps.go b/siso/build/deps.go
+index c55f168f..b9bddc6e 100644
+--- a/siso/build/deps.go
++++ b/siso/build/deps.go
+@@ -300,9 +300,13 @@ func checkDeps(ctx context.Context, b *Builder, step *Step, deps []string) error
+ 		platform = step.cmd.REProxyConfig.Platform
+ 	}
+ 	relocatableReq := platform["InputRootAbsolutePath"] == ""
++	remote := b.mayRunRemote(step)
+ 	for _, dep := range deps {
+ 		// remote relocatableReq should not have absolute path dep.
+-		if filepath.IsAbs(dep) {
++		// local step may have absolute path dep, e.g. header generated
++		// in build dir out of exec root. check it as other deps, so
++		// deps log keeps it.
++		if filepath.IsAbs(dep) && remote {
+ 			if relocatableReq {
+ 				clog.Warningf(ctx, "check deps: abs path in deps %s: platform=%v", dep, platform)
+ 				if platform != nil {
+diff --git a/siso/build/deps_test.go b/siso/build/deps_test.go
+index d1a2425a..18b51038 100644
+--- a/siso/build/deps_test.go
++++ b/siso/build/deps_test.go
+@@ -6,6 +6,7 @@ package build
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"testing"
+@@ -13,6 +14,8 @@ import (
+ 	"github.com/google/go-cmp/cmp"
+ 
+ 	"go.chromium.org/build/siso/execute"
++	"go.chromium.org/build/siso/execute/remoteexec"
++	"go.chromium.org/build/siso/execute/reproxyexec"
+ 	"go.chromium.org/build/siso/hashfs"
+ )
+ 
+@@ -72,3 +75,105 @@ func TestDepsExpandInputs(t *testing.T) {
+ 		t.Errorf("depsExpandInputs: diff -want +got:\n%s", diff)
+ 	}
+ }
++
++// wrapperStepDef is a step def whose rule sets use_remote_exec_wrapper.
++type wrapperStepDef struct {
++	fakeStepDef
++}
++
++func (f wrapperStepDef) Binding(b string) string {
++	if b == "use_remote_exec_wrapper" {
++		return "rewrapper"
++	}
++	return f.fakeStepDef.Binding(b)
++}
++
++// Test mayRunRemote is true only for step that siso may run remotely,
++// so checkDeps keeps refusing absolute path dep for such step.
++func TestMayRunRemote(t *testing.T) {
++	ctx := t.Context()
++	platform := map[string]string{"OSFamily": "Linux"}
++	for _, tc := range []struct {
++		name string
++		b    *Builder
++		def  StepDef
++		cmd  *execute.Cmd
++		want bool
++	}{
++		{
++			name: "remote exec wrapper",
++			b:    &Builder{},
++			def:  wrapperStepDef{},
++			cmd:  &execute.Cmd{},
++			want: true,
++		},
++		{
++			name: "reproxy",
++			b:    &Builder{reproxyExec: reproxyexec.New(ctx, "localhost:1234")},
++			def:  fakeStepDef{},
++			cmd:  &execute.Cmd{REProxyConfig: &execute.REProxyConfig{}},
++			want: true,
++		},
++		{
++			name: "remote exec",
++			b:    &Builder{remoteExec: remoteexec.New(ctx, nil)},
++			def:  fakeStepDef{},
++			cmd:  &execute.Cmd{Platform: platform},
++			want: true,
++		},
++		{
++			name: "platform without remote exec",
++			b:    &Builder{},
++			def:  fakeStepDef{},
++			cmd:  &execute.Cmd{Platform: platform},
++			want: false,
++		},
++		{
++			name: "platform with reproxy disabled",
++			b:    &Builder{reproxyExec: reproxyexec.New(ctx, "")},
++			def:  fakeStepDef{},
++			cmd: &execute.Cmd{
++				Platform:      platform,
++				REProxyConfig: &execute.REProxyConfig{},
++			},
++			want: false,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			step := &Step{def: tc.def, cmd: tc.cmd}
++			got := tc.b.mayRunRemote(step)
++			if got != tc.want {
++				t.Errorf("mayRunRemote=%t; want %t", got, tc.want)
++			}
++		})
++	}
++}
++
++// Test checkDeps refuses absolute path dep of step that may run
++// remotely, when the platform does not set InputRootAbsolutePath.
++func TestCheckDeps_AbsDepRemote(t *testing.T) {
++	ctx := t.Context()
++	hfs, err := hashfs.New(ctx, hashfs.Option{})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer hfs.Close(ctx)
++
++	b := &Builder{
++		hashFS:     hfs,
++		path:       NewPath(t.TempDir(), "out/siso"),
++		remoteExec: remoteexec.New(ctx, nil),
++	}
++	step := &Step{
++		def: fakeStepDef{},
++		cmd: &execute.Cmd{
++			Outputs:  []string{"out/siso/obj/foo.o"},
++			Platform: map[string]string{"OSFamily": "Linux"},
++		},
++	}
++	dep := filepath.Join(t.TempDir(), "gen/gen.h")
++	err = checkDeps(ctx, b, step, []string{dep})
++	if !errors.Is(err, errNotRelocatable) {
++		t.Errorf("checkDeps(ctx, b, step, {%q})=%v; want %v", dep, err, errNotRelocatable)
++	}
++}
+diff --git a/siso/build/exec_reproxy.go b/siso/build/exec_reproxy.go
+index 50985c64..0d3f873b 100644
+--- a/siso/build/exec_reproxy.go
++++ b/siso/build/exec_reproxy.go
+@@ -10,7 +10,6 @@ import (
+ 	"fmt"
+ 	"io/fs"
+ 	"os"
+-	"path/filepath"
+ 	"strings"
+ 	"time"
+ 
+@@ -116,7 +115,7 @@ func allowWriteOutputs(ctx context.Context, cmd *execute.Cmd) error {
+ 	ctx, span := trace.NewSpan(ctx, "allow-write-outputs")
+ 	defer span.Close(nil)
+ 	for _, out := range cmd.Outputs {
+-		fname := filepath.Join(cmd.ExecRoot, out)
++		fname := absFromExecRoot(cmd.ExecRoot, out)
+ 		fi, err := os.Lstat(fname)
+ 		if errors.Is(err, fs.ErrNotExist) {
+ 			// Do nothing if the file doesn't exist.
+diff --git a/siso/build/path.go b/siso/build/path.go
+index e71f291d..dfa74cee 100644
+--- a/siso/build/path.go
++++ b/siso/build/path.go
+@@ -117,3 +117,13 @@ func (p *Path) AbsFromWD(path string) string {
+ 	}
+ 	return filepath.Join(p.ExecRoot, p.Dir, path)
+ }
++
++// absFromExecRoot converts exec root relative to absolute path.
++// It keeps absolute path as is, as FromWD keeps absolute path
++// for out of exec root.
++func absFromExecRoot(execRoot, path string) string {
++	if filepath.IsAbs(path) {
++		return path
++	}
++	return filepath.Join(execRoot, path)
++}
+diff --git a/siso/build/rsp.go b/siso/build/rsp.go
+index dd0276a0..992ed3d1 100644
+--- a/siso/build/rsp.go
++++ b/siso/build/rsp.go
+@@ -10,7 +10,6 @@ import (
+ 	"fmt"
+ 	"io/fs"
+ 	"os"
+-	"path/filepath"
+ 	"time"
+ 
+ 	log "github.com/golang/glog"
+@@ -35,7 +34,7 @@ func (b *Builder) setupRSP(ctx context.Context, step *Step) error {
+ 		// to avoid chtimes error with "no such file or directory"
+ 		// when rsp was removed by some other action. b/479933778
+ 		_, herr := b.hashFS.Stat(ctx, step.cmd.ExecRoot, rsp)
+-		_, lerr := b.hashFS.OS.Lstat(ctx, filepath.Join(step.cmd.ExecRoot, rsp))
++		_, lerr := b.hashFS.OS.Lstat(ctx, absFromExecRoot(step.cmd.ExecRoot, rsp))
+ 		if herr == nil && errors.Is(lerr, fs.ErrNotExist) {
+ 			clog.Warningf(ctx, "unexpected rsp remove detected %q", rsp)
+ 			b.hashFS.Forget(ctx, step.cmd.ExecRoot, []string{rsp})
+@@ -68,7 +67,7 @@ func (b *Builder) teardownRSP(ctx context.Context, step *Step) {
+ 		clog.Warningf(ctx, "failed to remove %s: %v", rsp, err)
+ 	}
+ 	// remove local file if it is used on local?
+-	err = os.Remove(filepath.Join(step.cmd.ExecRoot, rsp))
++	err = os.Remove(absFromExecRoot(step.cmd.ExecRoot, rsp))
+ 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+ 		clog.Warningf(ctx, "failed to remove %s: %v", rsp, err)
+ 	}
+diff --git a/siso/build/run_cmd.go b/siso/build/run_cmd.go
+index 74550515..55d25d34 100644
+--- a/siso/build/run_cmd.go
++++ b/siso/build/run_cmd.go
+@@ -21,6 +21,18 @@ func (b *Builder) allowREProxy(step *Step) bool {
+ 	return (b.reproxyExec.Enabled() && step.cmd.REProxyConfig != nil)
+ }
+ 
++// mayRunRemote reports whether the step may run remotely: by remote exec,
++// by reproxy, or by remote exec wrapper.
++func (b *Builder) mayRunRemote(step *Step) bool {
++	if step.def.Binding("use_remote_exec_wrapper") != "" {
++		return true
++	}
++	if b.reproxyExec != nil && b.allowREProxy(step) {
++		return true
++	}
++	return b.allowRemote(step)
++}
++
+ func (b *Builder) runStrategy(step *Step) func(context.Context, *Step) error {
+ 	// Check criteria for allowRemote and allowREProxy
+ 	// If the command doesn't meet either criteria, fallback to local.
+diff --git a/siso/build/tree_input.go b/siso/build/tree_input.go
+index 0f6051f5..c0c6ca97 100644
+--- a/siso/build/tree_input.go
++++ b/siso/build/tree_input.go
+@@ -86,7 +86,7 @@ func (b *Builder) treeInput(ctx context.Context, dir, labelSuffix string, fixFn
+ 	m := b.graph.InputDeps(ctx)
+ 	if !filepath.IsLocal(dir) {
+ 		// only allowed for dockerChrootPath=. in platform container image
+-		absdir := filepath.ToSlash(filepath.Join(b.path.ExecRoot, dir))
++		absdir := filepath.ToSlash(absFromExecRoot(b.path.ExecRoot, dir))
+ 		if log.V(1) {
+ 			clog.Infof(ctx, "tree dir: %q %q -> %q", b.path.ExecRoot, dir, absdir)
+ 		}
+diff --git a/siso/hashfs/fs.go b/siso/hashfs/fs.go
+index 2d6dc445..3cf628da 100644
+--- a/siso/hashfs/fs.go
++++ b/siso/hashfs/fs.go
+@@ -300,7 +300,7 @@ func (hfs *HashFS) TaintedFiles() []string {
+ 
+ // AddMissingOutput adds a missing output.
+ func (hfs *HashFS) AddMissingOutput(ctx context.Context, root, fname string) {
+-	hfs.missingOutputs.Store(filepath.ToSlash(filepath.Join(root, fname)), true)
++	hfs.missingOutputs.Store(makeFullpath(root, fname), true)
+ }
+ 
+ // FileSystem returns FileSystem interface at dir.
+@@ -1082,7 +1082,7 @@ func (hfs *HashFS) Entries(ctx context.Context, root string, inputs []string) ([
+ 		target := e.target
+ 		if target != "" {
+ 			var tname string
+-			name := filepath.Join(root, fname)
++			name := makeFullpath(root, fname)
+ 			elink := e
+ 			for range maxSymlinks {
+ 				tname = makeFullpath(filepath.Dir(name), elink.target)
+@@ -1240,8 +1240,9 @@ func (hfs *HashFS) Update(ctx context.Context, execRoot string, entries []Update
+ 
+ 	for _, ent := range entries {
+ 		clog.Infof(ctx, "update %v", ent)
+-		fname := filepath.Join(execRoot, ent.Name)
+-		fname = filepath.ToSlash(fname)
++		// ent.Name is relative to execRoot, or absolute when it is
++		// out of execRoot (e.g. an absolute build dir).
++		fname := makeFullpath(execRoot, ent.Name)
+ 		if ent.Entry == nil {
+ 			// UpdateEntry was captured by RetrieveUpdateEntriesFromLocal
+ 			// so the entry should exists in hfs.directory.
+diff --git a/siso/hashfs/fs_test.go b/siso/hashfs/fs_test.go
+index ff15a2ea..1e3ae8b1 100644
+--- a/siso/hashfs/fs_test.go
++++ b/siso/hashfs/fs_test.go
+@@ -887,6 +887,97 @@ func TestUpdate_FromLocal_update(t *testing.T) {
+ 	}
+ }
+ 
++// Test Update records an output given as absolute path out of exec root
++// (e.g. absolute build dir) at that path, not under exec root.
++func TestUpdate_FromLocal_OutOfExecRoot(t *testing.T) {
++	ctx := t.Context()
++	base := t.TempDir()
++	base, err := filepath.EvalSymlinks(base)
++	if err != nil {
++		t.Fatal(err)
++	}
++	execRoot := filepath.Join(base, "src")
++	err = os.MkdirAll(execRoot, 0755)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	opt := hashfs.Option{}
++	hfs, err := hashfs.New(ctx, opt)
++	if err != nil {
++		t.Fatalf("New=%v", err)
++	}
++	defer func() {
++		if hfs == nil {
++			return
++		}
++		err := hfs.Close(ctx)
++		if err != nil {
++			t.Fatalf("hfs.Close=%v", err)
++		}
++	}()
++
++	fname := filepath.ToSlash(filepath.Join(base, "out/gen/foo.stamp"))
++	setupFiles(t, base, map[string]string{
++		"out/gen/foo.stamp": "0",
++	})
++	pre := hfs.RetrieveUpdateEntries(ctx, execRoot, []string{fname})
++	if len(pre) != 1 {
++		t.Fatalf("RetrieveUpdateEntries(ctx, %q, {%q})=%d entries; want 1", execRoot, fname, len(pre))
++	}
++
++	time.Sleep(1 * time.Microsecond)
++	setupFiles(t, base, map[string]string{
++		"out/gen/foo.stamp": "1",
++	})
++	h := sha256.New()
++	h.Write([]byte("command line"))
++	cmdhash := h.Sum(nil)
++	post := hfs.RetrieveUpdateEntriesFromLocal(ctx, execRoot, []string{fname})
++	now := time.Now()
++	entries := computeUpdateEntries(pre, post, false, now, cmdhash)
++	err = hfs.Update(ctx, execRoot, entries)
++	if err != nil {
++		t.Errorf("Update(ctx, %q, {%q}, %v, cmdhash)=%v; want nil err", execRoot, fname, now, err)
++	}
++
++	fi, err := hfs.Stat(ctx, execRoot, fname)
++	if err != nil {
++		t.Fatalf("Stat(ctx, %q, %q)=_, %v; want nil err", execRoot, fname, err)
++	}
++	if !bytes.Equal(fi.CmdHash(), cmdhash) {
++		t.Errorf("fi.CmdHash()=%q want=%q", base64.StdEncoding.EncodeToString(fi.CmdHash()), base64.StdEncoding.EncodeToString(cmdhash))
++	}
++	m := hashfs.StateMap(hfs.State(ctx))
++	hfs = nil
++	wrongname := filepath.ToSlash(filepath.Join(execRoot, fname))
++	if _, ok := m[wrongname]; ok {
++		t.Errorf("unexpected entry for %s", wrongname)
++	}
++	e, ok := m[fname]
++	if !ok {
++		var keys []string
++		for k := range m {
++			keys = append(keys, k)
++		}
++		sort.Strings(keys)
++		t.Fatalf("entry for %s not found: %q", fname, keys)
++	}
++	if e.Id.ModTime != now.UnixNano() {
++		t.Errorf("entry modtime=%d want=%d", e.Id.ModTime, now.UnixNano())
++	}
++	if !bytes.Equal(e.CmdHash, cmdhash) {
++		t.Errorf("entry cmdhash=%q want=%q", base64.StdEncoding.EncodeToString(e.CmdHash), base64.StdEncoding.EncodeToString(cmdhash))
++	}
++	lfi, err := os.Lstat(fname)
++	if err != nil {
++		t.Fatalf("lstat(%q)=%v; want nil", fname, err)
++	}
++	if e.Id.ModTime != lfi.ModTime().UnixNano() {
++		t.Errorf("entry modtime=%d lfi=%d", e.Id.ModTime, lfi.ModTime().UnixNano())
++	}
++}
++
+ // Test IsChanged is true after Update from local with restat,
+ // if stamp file didn't exist before.
+ func TestUpdate_FromLocal_Restat_update(t *testing.T) {
+diff --git a/siso/subcmd/ninja/e2etests/local_test.go b/siso/subcmd/ninja/e2etests/local_test.go
+index 94bf2b68..3af40f22 100644
+--- a/siso/subcmd/ninja/e2etests/local_test.go
++++ b/siso/subcmd/ninja/e2etests/local_test.go
+@@ -11,6 +11,7 @@ import (
+ 	"slices"
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	"go.chromium.org/build/siso/build"
+ 	"go.chromium.org/build/siso/build/ninjabuild"
+@@ -116,6 +117,330 @@ build build.ninja: phony
+ 	}
+ }
+ 
++// Test incremental build with build dir given as absolute path
++// out of exec root.
++func TestBuild_Local_AbsBuildDir(t *testing.T) {
++	if !runInSubProcess(t) {
++		return
++	}
++	ctx := t.Context()
++	topdir := tempDir(t)
++
++	dir := filepath.Join(topdir, "src")
++	outdir := filepath.ToSlash(filepath.Join(topdir, "out"))
++
++	runNinjaTest := func(t *testing.T) (build.Stats, error) {
++		t.Helper()
++		opt, graph, cleanup := setupBuild(ctx, t, dir, hashfs.Option{
++			StateFile: ".siso_fs_state",
++		})
++		defer cleanup()
++		return ninjabuild.Run(ctx, graph, opt, nil, ninjabuild.RunNinjaOpts{})
++	}
++
++	writeFile := func(t *testing.T, fname, content string) {
++		t.Helper()
++		err := os.MkdirAll(filepath.Dir(fname), 0755)
++		if err != nil {
++			t.Fatal(err)
++		}
++		err = os.WriteFile(fname, []byte(content), 0644)
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	mtime := func(t *testing.T, fname string) time.Time {
++		t.Helper()
++		fi, err := os.Stat(fname)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return fi.ModTime()
++	}
++
++	writeFile(t, filepath.Join(dir, "build/config/siso/main.star"), `
++load("@builtin//encoding.star", "json")
++load("@builtin//struct.star", "module")
++
++def init(ctx):
++    return module(
++        "config",
++        step_config = json.encode({"rules": []}),
++        filegroups = {},
++        handlers = {},
++    )
++`)
++	writeFile(t, filepath.Join(dir, "tools/cc.py"), `
++import sys
++out, depfile, src = sys.argv[1:]
++with open(src) as f, open(out, "w") as o:
++    o.write(f.read())
++with open(depfile, "w") as d:
++    d.write(out + ": " + src + " ../../base/foo.h\n")
++`)
++	writeFile(t, filepath.Join(dir, "tools/cp.py"), `
++import sys
++src, out = sys.argv[1:]
++with open(src) as f, open(out, "w") as o:
++    o.write(f.read())
++`)
++	writeFile(t, filepath.Join(dir, "base/foo.cc"), "foo.cc")
++	writeFile(t, filepath.Join(dir, "base/foo.h"), "foo.h")
++	writeFile(t, filepath.Join(dir, "base/bar.in"), "bar.in")
++	// need to escape ":" (eps. on windows)
++	out := strings.ReplaceAll(outdir, ":", "$:")
++	writeFile(t, filepath.Join(dir, "out/siso/build.ninja"), fmt.Sprintf(`
++builddir = %[1]s
++
++rule cc
++  command = python3 ../../tools/cc.py ${out} ${out}.d ${in}
++  deps = gcc
++  depfile = ${out}.d
++
++rule cp
++  command = python3 ../../tools/cp.py ${in} ${out}
++
++build %[1]s/obj/foo.o: cc ../../base/foo.cc
++build %[1]s/gen/bar.txt: cp ../../base/bar.in
++
++build all: phony %[1]s/obj/foo.o %[1]s/gen/bar.txt
++
++build build.ninja: phony
++`, out))
++	err := os.MkdirAll(filepath.Join(outdir, "obj"), 0755)
++	if err != nil {
++		t.Fatal(err)
++	}
++	err = os.MkdirAll(filepath.Join(outdir, "gen"), 0755)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	t.Logf("-- first build")
++	stats, err := runNinjaTest(t)
++	if err != nil {
++		t.Fatalf("ninja err: %v", err)
++	}
++	if stats.Done != stats.Total || stats.Local != 2 || stats.Total != 3 {
++		t.Errorf("done=%d total=%d local=%d; want done=total=3 local=2: %#v", stats.Done, stats.Total, stats.Local, stats)
++	}
++
++	t.Logf("-- check deps log")
++	func() {
++		depsLog, cleanup := openDepsLog(ctx, t, dir)
++		defer cleanup()
++		fooObj := outdir + "/obj/foo.o"
++		deps, mtime, err := depsLog.RetrievePaths(ctx, fooObj)
++		if err != nil {
++			t.Fatalf("depsLog.RetrievePaths(ctx, %q)=%v, %v, %v; want nil err", fooObj, deps, mtime, err)
++		}
++		want := []string{"../../base/foo.cc", "../../base/foo.h"}
++		if !slices.Equal(deps, want) {
++			t.Errorf("deps for %s=%q; want=%q", fooObj, deps, want)
++		}
++	}()
++
++	t.Logf("-- confirm no-op")
++	stats, err = runNinjaTest(t)
++	if err != nil {
++		t.Fatalf("ninja err: %v", err)
++	}
++	if stats.Done != stats.Total || stats.Local != 0 || stats.Skipped != 3 || stats.Total != 3 {
++		t.Errorf("done=%d total=%d skipped=%d local=%d; want done=total=skipped=3 local=0: %#v", stats.Done, stats.Total, stats.Skipped, stats.Local, stats)
++	}
++
++	fooObj := outdir + "/obj/foo.o"
++	barTxt := outdir + "/gen/bar.txt"
++	fooMtime := mtime(t, fooObj)
++	barMtime := mtime(t, barTxt)
++	touchFile(t, dir, "base/foo.h")
++	t.Logf("-- second build")
++	stats, err = runNinjaTest(t)
++	if err != nil {
++		t.Fatalf("ninja err: %v", err)
++	}
++	if stats.Done != stats.Total || stats.Local != 1 || stats.Skipped != 2 || stats.Total != 3 {
++		t.Errorf("done=%d total=%d skipped=%d local=%d; want done=total=3 skipped=2 local=1: %#v", stats.Done, stats.Total, stats.Skipped, stats.Local, stats)
++	}
++	if got := mtime(t, fooObj); got.Equal(fooMtime) {
++		t.Errorf("%s not rebuilt: mtime=%v", fooObj, got)
++	}
++	if got := mtime(t, barTxt); !got.Equal(barMtime) {
++		t.Errorf("%s rebuilt: mtime=%v want=%v", barTxt, got, barMtime)
++	}
++}
++
++// Test local step of remote rule without remote exec accepts
++// absolute path dep out of exec root, and records it in deps log.
++func TestBuild_Local_AbsBuildDirGeneratedHeader(t *testing.T) {
++	if !runInSubProcess(t) {
++		return
++	}
++	ctx := t.Context()
++	topdir := tempDir(t)
++
++	dir := filepath.Join(topdir, "src")
++	outdir := filepath.ToSlash(filepath.Join(topdir, "out"))
++
++	runNinjaTest := func(t *testing.T) (build.Stats, error) {
++		t.Helper()
++		opt, graph, cleanup := setupBuild(ctx, t, dir, hashfs.Option{
++			StateFile: ".siso_fs_state",
++		})
++		defer cleanup()
++		return ninjabuild.Run(ctx, graph, opt, nil, ninjabuild.RunNinjaOpts{})
++	}
++
++	writeFile := func(t *testing.T, fname, content string) {
++		t.Helper()
++		err := os.MkdirAll(filepath.Dir(fname), 0755)
++		if err != nil {
++			t.Fatal(err)
++		}
++		err = os.WriteFile(fname, []byte(content), 0644)
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	mtime := func(t *testing.T, fname string) time.Time {
++		t.Helper()
++		fi, err := os.Stat(fname)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return fi.ModTime()
++	}
++
++	// "remote": True gives the step a platform, even with no
++	// platforms and no remote exec configured.
++	writeFile(t, filepath.Join(dir, "build/config/siso/main.star"), `
++load("@builtin//encoding.star", "json")
++load("@builtin//struct.star", "module")
++
++def init(ctx):
++    step_config = {
++        "platforms": {},
++        "rules": [
++            {
++                "name": "cc",
++                "action": "cc",
++                "remote": True,
++            },
++        ],
++    }
++    return module(
++        "config",
++        step_config = json.encode(step_config),
++        filegroups = {},
++        handlers = {},
++    )
++`)
++	writeFile(t, filepath.Join(dir, "tools/cc.py"), `
++import sys
++out, depfile, src = sys.argv[1:4]
++hdrs = sys.argv[4:]
++with open(out, "w") as o:
++    for f in [src] + hdrs:
++        with open(f) as i:
++            o.write(i.read())
++with open(depfile, "w") as d:
++    d.write(out + ": " + " ".join([src] + hdrs) + "\n")
++`)
++	writeFile(t, filepath.Join(dir, "tools/cp.py"), `
++import sys
++src, out = sys.argv[1:]
++with open(src) as f, open(out, "w") as o:
++    o.write(f.read())
++`)
++	writeFile(t, filepath.Join(dir, "base/foo.cc"), "foo.cc")
++	writeFile(t, filepath.Join(dir, "base/bar.cc"), "bar.cc")
++	writeFile(t, filepath.Join(dir, "base/gen.h.in"), "gen.h")
++	// need to escape ":" (eps. on windows)
++	out := strings.ReplaceAll(outdir, ":", "$:")
++	writeFile(t, filepath.Join(dir, "out/siso/build.ninja"), fmt.Sprintf(`
++builddir = %[1]s
++
++rule gen
++  command = python3 ../../tools/cp.py ${in} ${out}
++
++rule cc
++  command = python3 ../../tools/cc.py ${out} ${out}.d ${in} ${hdrs}
++  deps = gcc
++  depfile = ${out}.d
++
++build %[1]s/gen/gen.h: gen ../../base/gen.h.in
++build %[1]s/obj/foo.o: cc ../../base/foo.cc || %[1]s/gen/gen.h
++  hdrs = %[1]s/gen/gen.h
++build %[1]s/obj/bar.o: cc ../../base/bar.cc || %[1]s/gen/gen.h
++
++build all: phony %[1]s/obj/foo.o %[1]s/obj/bar.o
++
++build build.ninja: phony
++`, out))
++	for _, d := range []string{"obj", "gen"} {
++		err := os.MkdirAll(filepath.Join(outdir, d), 0755)
++		if err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	t.Logf("-- first build")
++	stats, err := runNinjaTest(t)
++	if err != nil {
++		t.Fatalf("ninja err: %v", err)
++	}
++	if stats.Done != stats.Total || stats.Local != 3 || stats.Total != 4 {
++		t.Errorf("done=%d total=%d local=%d; want done=total=4 local=3: %#v", stats.Done, stats.Total, stats.Local, stats)
++	}
++
++	t.Logf("-- check deps log")
++	func() {
++		depsLog, cleanup := openDepsLog(ctx, t, dir)
++		defer cleanup()
++		fooObj := outdir + "/obj/foo.o"
++		deps, mtime, err := depsLog.RetrievePaths(ctx, fooObj)
++		if err != nil {
++			t.Fatalf("depsLog.RetrievePaths(ctx, %q)=%v, %v, %v; want nil err", fooObj, deps, mtime, err)
++		}
++		want := []string{"../../base/foo.cc", outdir + "/gen/gen.h"}
++		if !slices.Equal(deps, want) {
++			t.Errorf("deps for %s=%q; want=%q", fooObj, deps, want)
++		}
++	}()
++
++	t.Logf("-- confirm no-op")
++	stats, err = runNinjaTest(t)
++	if err != nil {
++		t.Fatalf("ninja err: %v", err)
++	}
++	if stats.Done != stats.Total || stats.Local != 0 || stats.Skipped != 4 || stats.Total != 4 {
++		t.Errorf("done=%d total=%d skipped=%d local=%d; want done=total=skipped=4 local=0: %#v", stats.Done, stats.Total, stats.Skipped, stats.Local, stats)
++	}
++
++	// foo.o depends on gen.h only through the deps log.
++	fooObj := outdir + "/obj/foo.o"
++	barObj := outdir + "/obj/bar.o"
++	fooMtime := mtime(t, fooObj)
++	barMtime := mtime(t, barObj)
++	touchFile(t, dir, "base/gen.h.in")
++	t.Logf("-- second build")
++	stats, err = runNinjaTest(t)
++	if err != nil {
++		t.Fatalf("ninja err: %v", err)
++	}
++	if stats.Done != stats.Total || stats.Local != 2 || stats.Skipped != 2 || stats.Total != 4 {
++		t.Errorf("done=%d total=%d skipped=%d local=%d; want done=total=4 skipped=2 local=2: %#v", stats.Done, stats.Total, stats.Skipped, stats.Local, stats)
++	}
++	if got := mtime(t, fooObj); got.Equal(fooMtime) {
++		t.Errorf("%s not rebuilt: mtime=%v", fooObj, got)
++	}
++	if got := mtime(t, barObj); !got.Equal(barMtime) {
++		t.Errorf("%s rebuilt: mtime=%v want=%v", barObj, got, barMtime)
++	}
++}
++
+ func TestBuild_Local_Inputs(t *testing.T) {
+ 	if !runInSubProcess(t) {
+ 		return

@@ -31,11 +31,18 @@
         });
       };
 
+      sisoOverlay = final: prev: {
+        siso = final.callPackage ./siso { };
+      };
+
       mkPkgs =
         system:
         import nixpkgs {
           inherit system;
-          overlays = [ guardedZshOverlay ];
+          overlays = [
+            guardedZshOverlay
+            sisoOverlay
+          ];
         };
 
       fhs =
@@ -86,6 +93,7 @@
                 python3
                 roboto
                 rsync
+                siso
                 unzip
                 util-linux
                 xmlstarlet
@@ -190,6 +198,7 @@
               ];
             }
           );
+          inherit (pkgs) siso;
           execShell = fhs "exec-aosp-env" pkgs { } [ ];
           aautoShell =
             let
