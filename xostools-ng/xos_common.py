@@ -8,7 +8,7 @@ import subprocess
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple
+from typing import List, Optional, Dict, Sequence, Tuple
 from dataclasses import dataclass
 import git
 import requests
@@ -513,17 +513,28 @@ class GitOperations:
             return []
 
     @staticmethod
-    def unshallow_repo(repo_path: Path) -> bool:
-        """Unshallow a repository if it's shallow."""
-        try:
-            if GitOperations.is_shallow_repo(repo_path):
-                repo = git.Repo(repo_path)
-                repo.git.fetch("--unshallow")
+    def unshallow_repo(repo_path: Path, remotes: Optional[Sequence[str]] = None) -> bool:
+        """Unshallow a repository from the first of the remotes that completes it.
+
+        `remotes` defaults to every remote of the repository, in configuration order.
+        Each fetch names its remote: without one, git picks the branch's remote or
+        origin, and in a repository with several remotes and neither of those it
+        exits successfully without fetching anything. Success is therefore read from
+        the repository afterwards, never from the fetch.
+        """
+        if not GitOperations.is_shallow_repo(repo_path):
+            return True
+        repo = git.Repo(repo_path)
+        for remote in remotes if remotes is not None else [r.name for r in repo.remotes]:
+            try:
+                repo.git.fetch("--unshallow", remote)
+            except git.exc.GitCommandError as e:
+                print(f"Unshallowing from {remote} failed: {e}")
+                continue
+            if not GitOperations.is_shallow_repo(repo_path):
                 return True
-            return True  # Not shallow, nothing to do
-        except Exception as e:
-            print(f"Error unshallowing repository: {e}")
-            return False
+        print(f"{repo_path} is still shallow after fetching from every remote")
+        return False
 
     @staticmethod
     def add_remote(repo_path: Path, remote_name: str, remote_url: str,

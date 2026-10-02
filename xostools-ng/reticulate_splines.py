@@ -225,10 +225,14 @@ def perform_single_reticulation(
             # Remote might not exist yet, continue
             update_status("Checked (new repo)", advance=1)
 
-        # Unshallow BEFORE fetching from upstream - shallow repos hang when fetching new remotes
+        # Unshallow BEFORE fetching from upstream - shallow repos hang when fetching new remotes.
+        # The missing history comes from the remotes the checkout was cloned from; XOS has none
+        # of it yet, and a shallow branch cannot be pushed to it.
         if GitOperations.is_shallow_repo(project_path):
             update_status("Unshallowing repository", add_steps=1)
-            if not GitOperations.unshallow_repo(project_path):
+            sources = [remote.name for remote in repo.remotes if remote.name != 'XOS']
+            if not GitOperations.unshallow_repo(project_path, sources):
+                update_status("[red]Failed to unshallow repository[/red]", persistent=True, advance=1)
                 return SplineResult(project_name, False, "failed to unshallow repository")
             update_status("Unshallowed", advance=1)
 
