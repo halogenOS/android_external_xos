@@ -31,6 +31,7 @@ from xos_common import (
     get_github_token,
     repository_is_empty,
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 
 MAX_WORKERS = 10
@@ -443,6 +444,7 @@ def parse_args():
 
 def main():
     """Discover both namespaces and report every difference."""
+    switch_off_git_credential_prompts()
     stop_event.clear()
     args = parse_args()
 

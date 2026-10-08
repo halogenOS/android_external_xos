@@ -44,6 +44,7 @@ from xos_common import (
     find_similar_commit_by_message,
     get_project_path
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 from fetch_bulletin import get_bulletin_patches
 from git_lock import GitRepoLock
@@ -648,6 +649,7 @@ value {{
 
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="Verify security patches from Android Security Bulletins",
         formatter_class=argparse.RawDescriptionHelpFormatter,

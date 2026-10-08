@@ -22,6 +22,7 @@ from xos_common import (
     GitOperations, ProjectInfo, get_github_token, create_github_repo,
     console, forgejo_repo_ssh_url
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 # Global executor for signal handling
 executor = None
@@ -565,6 +566,7 @@ def parse_local_manifests(top: Path) -> List[ProjectInfo]:
     return projects
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description='Mirror all repositories to GitHub'
     )

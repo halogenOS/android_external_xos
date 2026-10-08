@@ -32,6 +32,7 @@ from xos_common import (
     cleanup_manifest,
     truncate_project_name,
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 stop_event = threading.Event()
 executor = None
@@ -226,6 +227,7 @@ class DiffDisplay:
 
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="List differences between local XOS branches and their upstream counterparts",
     )

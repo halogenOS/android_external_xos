@@ -1007,9 +1007,7 @@ def check_if_xos_repo_exists(repo_url: str, repo_path: Path) -> bool:
     """Check if XOS repository exists using git ls-remote."""
     try:
         repo = git.Repo(repo_path)
-        # Disable authentication prompts for the existence check
-        with repo.git.custom_environment(GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='true'):
-            repo.git.ls_remote(repo_url)
+        repo.git.ls_remote(repo_url)
         return True
     except git.exc.GitCommandError:
         return False

@@ -43,6 +43,7 @@ from xos_common import (
     forgejo_repo_url,
     forgejo_repo_ssh_url
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -189,9 +190,6 @@ def perform_single_reticulation(
             update_status("Initialized", advance=1)
 
         repo = git.Repo(project_path)
-
-        # Disable credential prompts - prevents hanging on auth
-        repo.git.update_environment(GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -o BatchMode=yes")
 
         # Check for unstaged changes and untracked files before proceeding
         if repo.is_dirty(untracked_files=True):
@@ -768,6 +766,7 @@ class SplineReticulator:
             return 0
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="Reticulate splines - Create branches from upstream sources",
         formatter_class=argparse.RawDescriptionHelpFormatter,

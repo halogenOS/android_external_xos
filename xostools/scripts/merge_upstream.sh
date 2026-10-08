@@ -2,8 +2,6 @@
 
 set -e
 
-export GIT_TERMINAL_PROMPT=0
-
 if [ "$1" != "--no-reset" ]; then
   echo "Warning: This will perform a reporeset and a reposync to make sure everything is up to date before doing the merges"
   echo "If you do not want that to happen, abort now using CTRL+C and use the parameter --no-reset"
@@ -16,6 +14,7 @@ export ANDROID_BUILD_TOP="$TOP"
 pushd $TOP
 
 source build/envsetup.sh
+source external/xos/xostools/disable_git_prompts.sh
 
 # The Forgejo service hosting the XOS repositories is configured once, in
 # includes.sh, which build/envsetup.sh sources through the product setup.

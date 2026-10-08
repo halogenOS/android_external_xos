@@ -42,6 +42,7 @@ from xos_common import (
     get_xos_target_branch_for_tracked_project,
     forgejo_repo_url
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -644,6 +645,7 @@ class BranchMerger:
             return 0
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="Merge branches across all repositories",
         formatter_class=argparse.RawDescriptionHelpFormatter,

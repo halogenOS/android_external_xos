@@ -41,6 +41,7 @@ from xos_common import (
     truncate_project_name,
     forgejo_repo_url
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -803,6 +804,7 @@ class UpstreamMerger:
 
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="Merge upstream changes for repositories",
         formatter_class=argparse.RawDescriptionHelpFormatter,

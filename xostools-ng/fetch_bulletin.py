@@ -18,6 +18,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn, TimeElapsedColumn
 from xos_common import get_android_top
+from git_credential_prompts import switch_off_git_credential_prompts
 
 console = Console()
 
@@ -631,6 +632,7 @@ def get_bulletin_patches(date_str):
 
 
 def main():
+    switch_off_git_credential_prompts()
     if len(sys.argv) != 2:
         print("Usage: python fetch_bulletin.py YYYY-MM-DD", file=sys.stderr)
         print("Example: python fetch_bulletin.py 2025-09-01", file=sys.stderr)

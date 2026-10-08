@@ -56,6 +56,7 @@ from xos_common import (
     get_xos_target_branch_for_tracked_project,
     setup_tracked_project_branch
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 from fetch_bulletin import get_bulletin_patches
 from git_lock import GitRepoLock
@@ -1433,25 +1434,22 @@ class BulletinCherryPicker:
                 # No separate push URL, use the fetch URL
                 push_url = remote.url
 
-            # Configure git to fail immediately if authentication is required
-            # This prevents hanging on password prompts
-            with repo.git.custom_environment(GIT_TERMINAL_PROMPT='0', GIT_ASKPASS='true'):
-                try:
-                    # Use git command directly with explicit URL to ensure proper SSH usage
-                    push_output = repo.git.push(push_url, push_ref, '--progress', with_extended_output=True)
-                    console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
+            try:
+                # Use git command directly with explicit URL to ensure proper SSH usage
+                push_output = repo.git.push(push_url, push_ref, '--progress', with_extended_output=True)
+                console.print(f"[green]✓[/green] {result.project_path}: Pushed successfully")
 
-                    # Show git's progress output (stderr contains the progress info)
-                    if hasattr(push_output, 'stderr') and push_output.stderr:
-                        for line in push_output.stderr.split('\n'):
-                            if line.strip() and ('Enumerating' in line or 'Counting' in line or 'Writing' in line or 'Total' in line):
-                                console.print(f"    [dim]{result.project_path}:[/dim] {line}")
+                # Show git's progress output (stderr contains the progress info)
+                if hasattr(push_output, 'stderr') and push_output.stderr:
+                    for line in push_output.stderr.split('\n'):
+                        if line.strip() and ('Enumerating' in line or 'Counting' in line or 'Writing' in line or 'Total' in line):
+                            console.print(f"    [dim]{result.project_path}:[/dim] {line}")
 
-                    return True, None
-                except git.exc.GitCommandError as e:
-                    error_msg = str(e)
-                    console.print(f"[red]✗[/red] {result.project_path}: Push failed: {error_msg}")
-                    return False, error_msg
+                return True, None
+            except git.exc.GitCommandError as e:
+                error_msg = str(e)
+                console.print(f"[red]✗[/red] {result.project_path}: Push failed: {error_msg}")
+                return False, error_msg
 
         except Exception as e:
             console.print(f"[red]✗[/red] {result.project_path}: Push exception: {e}")
@@ -1747,6 +1745,7 @@ class BulletinCherryPicker:
 
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="Cherry-pick security patches from Android Security Bulletins",
         formatter_class=argparse.RawDescriptionHelpFormatter,

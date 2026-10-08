@@ -37,6 +37,7 @@
           installPhase = ''
             mkdir -p $out/${python3Packages.python.sitePackages}
             cp xos_common.py $out/${python3Packages.python.sitePackages}/
+            cp git_credential_prompts.py $out/${python3Packages.python.sitePackages}/
           '';
         };
 

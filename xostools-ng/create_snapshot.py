@@ -30,6 +30,7 @@ from xos_common import (
     console,
     run_repo_command
 )
+from git_credential_prompts import switch_off_git_credential_prompts
 
 # Global stop event for graceful shutdown
 stop_event = threading.Event()
@@ -312,6 +313,7 @@ class SnapshotCreator:
 
 
 def main():
+    switch_off_git_credential_prompts()
     parser = argparse.ArgumentParser(
         description="Create snapshot tags for repositories",
         formatter_class=argparse.RawDescriptionHelpFormatter,
