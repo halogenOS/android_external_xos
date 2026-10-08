@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # xostools-ng/git_credential_prompts.py defines the Git environment without
 # credential prompts for the shell tools and the Python tools alike. It writes
 # each variable it changes as one NAME=VALUE record ended by a NUL byte.
