@@ -119,7 +119,7 @@ function addLOS() {
 }
 
 function unLFS() {
-  git lfs install || :
+  git lfs install --local || :
   git lfs fetch
   git lfs checkout
   lfs_files=$(git lfs ls-files | awk '{ print $3 }')
@@ -130,7 +130,7 @@ function unLFS() {
   rm -f .gitattributes .lfsconfig
   git add .gitattributes .lfsconfig
   git commit -m "Un-LFS"
-  git lfs uninstall
+  git lfs uninstall --local
   if [ -n "$lfs_files" ]; then
     echo $lfs_files | xargs -I% git add %
   fi
