@@ -32,6 +32,7 @@
             rapidfuzz
             tqdm
             packaging
+            pkgs.git-lfs
           ];
 
           installPhase = ''
@@ -375,6 +376,7 @@
         devShell = pkgs.mkShell {
           buildInputs = with pkgs; [
             git
+            git-lfs
             git-repo
             xmlstarlet
           ] ++ (with python3Packages; [

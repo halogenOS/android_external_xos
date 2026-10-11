@@ -1080,7 +1080,7 @@ def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, st
 
         # Equivalent of the shell script unLFS function
         commands = [
-            ["git", "lfs", "install"],
+            ["git", "lfs", "install", "--local"],
             ["git", "lfs", "fetch"],
             ["git", "lfs", "checkout"]
         ]
@@ -1151,7 +1151,7 @@ def handle_lfs_cleanup(repo_path: Path, dry_run: bool = False) -> Tuple[bool, st
             pass  # Ignore if nothing to commit
 
         # Uninstall LFS
-        subprocess.run(["git", "lfs", "uninstall"], cwd=repo_path, check=False, capture_output=True)
+        subprocess.run(["git", "lfs", "uninstall", "--local"], cwd=repo_path, check=False, capture_output=True)
 
         # Add LFS files directly (equivalent to final part of shell script)
         if lfs_files:
