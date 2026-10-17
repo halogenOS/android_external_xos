@@ -196,7 +196,7 @@
               packages = [
                 (pkgs.writeShellApplication {
                   name = "aosp-env";
-                  text = "nix develop path:external/xos/devshell";
+                  text = "nix develop ./external/xos/devshell";
                 })
                 packages.${system}.execShell
               ];
