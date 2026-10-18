@@ -25,10 +25,10 @@
     "siso-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1792239981,
-        "narHash": "sha256-kiezjT8BxQV5cHBhLS9zyZNPpRwZ5z0RJx6TwmQNNsQ=",
+        "lastModified": 1792239989,
+        "narHash": "sha256-ewixLNqPc6IXQuTXLQ8HwsimJRhYSZDpO1vq5ecLrOM=",
         "ref": "XOS-17.0",
-        "rev": "a1fb7a71a0a58f06ed6a7c318d94d4152e44cf75",
+        "rev": "aa17e0f3c70141bfe8d508932f2b8fb1308fcf69",
         "shallow": true,
         "type": "git",
         "url": "https://git.halogenos.org/halogenOS/android_build_siso"
