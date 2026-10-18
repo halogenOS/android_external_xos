@@ -1,10 +1,14 @@
 {
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
+    siso-src = {
+      url = "git+https://git.halogenos.org/halogenOS/android_build_siso?ref=XOS-17.0&shallow=1";
+      flake = false;
+    };
   };
 
   outputs =
-    { nixpkgs, ... }:
+    { nixpkgs, siso-src, ... }:
     let
       forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
       lib = nixpkgs.lib;
@@ -32,7 +36,7 @@
       };
 
       sisoOverlay = final: prev: {
-        siso = final.callPackage ./siso { };
+        siso = final.callPackage ./siso { src = siso-src; };
       };
 
       mkPkgs =

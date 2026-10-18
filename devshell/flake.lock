@@ -18,7 +18,26 @@
     },
     "root": {
       "inputs": {
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "siso-src": "siso-src"
+      }
+    },
+    "siso-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792239981,
+        "narHash": "sha256-kiezjT8BxQV5cHBhLS9zyZNPpRwZ5z0RJx6TwmQNNsQ=",
+        "ref": "XOS-17.0",
+        "rev": "a1fb7a71a0a58f06ed6a7c318d94d4152e44cf75",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.halogenos.org/halogenOS/android_build_siso"
+      },
+      "original": {
+        "ref": "XOS-17.0",
+        "shallow": true,
+        "type": "git",
+        "url": "https://git.halogenos.org/halogenOS/android_build_siso"
       }
     }
   },
