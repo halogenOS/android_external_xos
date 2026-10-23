@@ -104,7 +104,9 @@ function build() {
             echo "Please run lunch first" >&2
             return 1
         fi
-        sign_build
+        local signed_out
+        signed_out="$(signed_product_out)" || return $?
+        sign_build m otapackage && name_ota_package "$signed_out"
         return $?
     fi
 
@@ -131,24 +133,18 @@ function build() {
 		device=${target#*_}
 		device=${device%%-*}
                 eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
-                # Packaging mode, the only place that decides the make goals
-                # and the post-build step
-                local packaging goals=()
-                if [ "$buildarg" != "full" ] || [ -n "$module" ]; then
-                    packaging=none
+                # Every build is the regular build of the goal before signing,
+                # then the signing run of the final goals. A full device build
+                # gives the signed OTA package its release name.
+                local command=m goals=() finish=print_signed_output
+                if [ -n "$module" ]; then
+                    [ "$buildarg" = "mm" ] && command=mmma
                     goals=("$module")
-                elif [[ "$target" == *"sdk_phone"* ]]; then
-                    packaging=none
-                elif [[ "$KEYS_DIR" = /* ]]; then
-                    # sign_build signs the target-files directory in place,
-                    # so neither the zipped target-files nor the unsigned
-                    # OTA package is needed
-                    packaging=sign
-                    goals=(target-files-dir otatools)
-                else
-                    packaging=name
+                elif [[ "$target" != *"sdk_phone"* ]]; then
                     goals=(otapackage)
+                    finish=name_ota_package
                 fi
+                check_keys_dir || return $?
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
@@ -156,16 +152,10 @@ function build() {
                 if [ "$buildarg" != "mm" ] && [[ "$target" == *"sdk_phone"* ]]; then
                     echob "Building for SDK phone"
                 fi
-                if [ "$buildarg" = "mm" ]; then
-                    mmma --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${goals[@]}" || return $?
-                else
-                    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${goals[@]}" || return $?
-                fi
-
-                case "$packaging" in
-                    sign) sign_build || return $? ;;
-                    name) name_ota_package || return $? ;;
-                esac
+                build_and_sign "$command" "$module" "${goals[@]}" || return $?
+                local signed_out
+                signed_out="$(signed_product_out)" || return $?
+                "$finish" "$signed_out" || return $?
             ;;
 
             module-list)
@@ -194,106 +184,109 @@ function build() {
     return 0
 }
 
-function sign_build() {
-    if [ -z "$KEYS_DIR" ]; then
-        echo "KEYS_DIR is not set" >&2
+# Fails unless KEYS_DIR is unset or is a directory with release keys
+function check_keys_dir() {
+    [ -z "$KEYS_DIR" ] && return 0
+    if [[ "$KEYS_DIR" != /* ]]; then
+        echo "KEYS_DIR needs an absolute path, got $KEYS_DIR" >&2
         return 1
     fi
     if [ ! -f "$KEYS_DIR/releasekey.pk8" ]; then
         echo "No release keys found in $KEYS_DIR" >&2
         return 1
     fi
-
-    local target_files_dir
-    target_files_dir=$(echo "$OUT"/obj/PACKAGING/target_files_intermediates/*-target_files)
-    if [ ! -d "$target_files_dir" ]; then
-        echo "No target-files directory found in $OUT" >&2
-        echo "Build with: m target-files-dir" >&2
-        return 1
-    fi
-
-    local sign_args=(-o -d "$KEYS_DIR")
-    for pk8 in "$KEYS_DIR"/*.certificate.override.pk8; do
-        [ -f "$pk8" ] || continue
-        local cert="$(basename "$pk8" .pk8)"
-        local apex="${cert%.certificate.override}"
-        sign_args+=(--extra_apks "${apex}.apex=$KEYS_DIR/$cert")
-        [ -f "$KEYS_DIR/${cert}.pem" ] && sign_args+=(--extra_apex_payload_key "${apex}.apex=$KEYS_DIR/${cert}.pem")
-    done
-    local misc_info="$target_files_dir/META/misc_info.txt"
-    local avb_partitions=(
-        boot init_boot dtbo product recovery system system_dlkm system_ext
-        system_other odm odm_dlkm pvmfw vendor vendor_boot vendor_kernel_boot
-        vendor_dlkm vbmeta vbmeta_system vbmeta_vendor
-    )
-    for part in "${avb_partitions[@]}"; do
-        local algo=$(grep "^avb_${part}_algorithm=" "$misc_info" 2>/dev/null | cut -d= -f2)
-        [ -z "$algo" ] && continue
-        local key_size="${algo##*RSA}"
-        local avb_key="$KEYS_DIR/avbkey_${key_size}.pem"
-        [ -f "$avb_key" ] || continue
-        sign_args+=(--avb_${part}_key "$avb_key" --avb_${part}_algorithm "$algo")
-    done
-
-    echob "Injecting build date..."
-    python3 "$TOP/$CUSTOM_PRODUCT_DIR/build/tools/inject_build_date.py" "$target_files_dir" || return $?
-
-    echob "Signing target-files in-place with release keys..."
-    sign_target_files_apks "${sign_args[@]}" "$target_files_dir" "$target_files_dir" || return $?
-
-    local custom_version
-    custom_version=$(read_custom_version \
-        "$target_files_dir/PRODUCT/etc/build.prop" \
-        "$target_files_dir/SYSTEM/product/etc/build.prop")
-    if [ -z "$custom_version" ]; then
-        echo "No ro.custom.version found in the product build.prop in $target_files_dir" >&2
-        return 1
-    fi
-    local signed_ota="${OUT}/${custom_version}.zip"
-
-    echob "Generating signed OTA package..."
-    ota_from_target_files -k "$KEYS_DIR/releasekey" "$target_files_dir" "$signed_ota" || return $?
-    write_sha256sum "$signed_ota" || return $?
-
-    if [ -f "$KEYS_DIR/avbkey_4096.pem" ]; then
-        echob "Extracting AVB public key..."
-        avbtool extract_public_key --key "$KEYS_DIR/avbkey_4096.pem" --output "${OUT}/pkmd.bin"
-    fi
-
-    echob "Signed OTA: $signed_ota"
 }
 
+# The regular build with the build command $1 (m or mmma), then the signing
+# run of the final goals that follow $2, or of the default goal when none
+# follow. For a module or directory $2, the regular build builds $2 and passes
+# no signing goals, since the signing run builds the same goal. When $2 is
+# empty, the regular build covers the whole product: it builds the installed
+# files, and every step that the final goals need except the steps that the
+# signing run runs, the steps that use the keys or the date and the steps that
+# read their outputs.
+function build_and_sign() {
+    local regular_args
+    if [ -n "$2" ]; then
+        regular_args=("$2")
+    else
+        regular_args=(--signing-goals="$(IFS=,; echo "${*:3}")" files)
+    fi
+    "$1" --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${regular_args[@]}" || return $?
+    sign_build "$1" "${@:3}"
+}
+
+# The signing run: the build of the goals with the build command $1, with the
+# release keys in KEYS_DIR or the test keys when KEYS_DIR is unset
+function sign_build() {
+    local args
+    signing_args args || return $?
+    "$1" --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${args[@]}" "${@:2}"
+}
+
+# Sets the array named $1 to the arguments that make a build the signing run
+function signing_args() {
+    check_keys_dir || return $?
+    local -n args_ref="$1"
+    args_ref=(--signing-run)
+    if [ -n "$KEYS_DIR" ]; then
+        args_ref=(--signing-keys-dir="$KEYS_DIR" "${args_ref[@]}")
+        echob "Signing with the keys in $KEYS_DIR..."
+    else
+        echob "Signing with the test keys..."
+    fi
+}
+
+# Prints the product output directory of the signing run, which the build
+# system reports.
+function signed_product_out() {
+    local signed_out
+    signed_out="$(get_build_var SIGNED_PRODUCT_OUT)" || return $?
+    if [ -z "$signed_out" ]; then
+        echo "The build system did not report SIGNED_PRODUCT_OUT" >&2
+        return 1
+    fi
+    echo "$signed_out"
+}
+
+function print_signed_output() {
+    echob "Signed output: $1"
+}
+
+# Gives the OTA package in the product output directory $1 its release name
 function name_ota_package() {
+    local product_out="$1"
     local product_name="$TARGET_PRODUCT"
     [ "$TARGET_BUILD_TYPE" = "debug" ] && product_name="${product_name}_debug"
-    local ota_package="${OUT}/${product_name}-ota.zip"
+    local ota_package="${product_out}/${product_name}-ota.zip"
     if [ ! -f "$ota_package" ]; then
         echo "No OTA package found at $ota_package" >&2
         return 1
     fi
 
     local custom_version
-    custom_version=$(read_custom_version \
-        "$OUT/product/etc/build.prop" \
-        "$OUT/system/product/etc/build.prop")
-    if [ -z "$custom_version" ]; then
-        echo "No ro.custom.version found in the product build.prop in $OUT" >&2
-        return 1
-    fi
-    local named_ota="${OUT}/${custom_version}.zip"
+    custom_version=$(cat "$product_out/product/etc/build.prop" \
+        "$product_out/system/product/etc/build.prop" \
+        2> /dev/null | read_custom_version "$product_out") || return $?
+    local named_ota="${product_out}/${custom_version}.zip"
 
+    # The hard link gives the package its release name without a copy
     echob "Naming OTA package..."
-    mv -f "$ota_package" "$named_ota" || return $?
+    ln -f "$ota_package" "$named_ota" || return $?
     write_sha256sum "$named_ota" || return $?
 
     echob "OTA: $named_ota"
 }
 
+# Reads build.prop text on stdin, $1 names where it came from
 function read_custom_version() {
-    local build_prop="$1"
-    [ -f "$build_prop" ] || build_prop="$2"
-    [ -f "$build_prop" ] || return 0
-    grep -m1 ro.custom.version= "$build_prop" | cut -d= -f2
+    local version
+    version=$(grep -m1 '^ro.custom.version=' | cut -d= -f2)
+    if [ -z "$version" ]; then
+        echo "No ro.custom.version found in the product build.prop in $1" >&2
+        return 1
+    fi
+    echo "$version"
 }
 
 # The checksum line names the file without its directory
@@ -312,8 +305,8 @@ function emu() {
         echo "  target: lunch target (e.g. sdk_phone64_x86_64-cp2a-userdebug)"
         echo "  skin:   emulator skin resolution (default: 1080x2160)"
         echo ""
-        echo "First run builds full images. Subsequent iterations:"
-        echo "  m files && adevice update"
+        echo "Builds the images, starts the emulator on them and waits until it"
+        echo "is closed. Run it again after a change."
         return 1
     fi
 
@@ -322,56 +315,11 @@ function emu() {
     device=${device%%-*}
     eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
 
-    # Full build including images (needed for emulator boot) + adevice tools
     echob "Building (including images for emulator)..."
-    m --skip-soong-tests $THREAD_COUNT_BUILD_ARG || return $?
-
-    # Launch emulator with writable system
-    echob "Launching emulator..."
-    emulator -skin "$skin" -writable-system &
-    local emu_pid=$!
-
-    # Find the emulator serial
-    echob "Waiting for emulator to appear..."
-    local emu_serial=""
-    while [ -z "$emu_serial" ]; do
-        emu_serial=$(adb devices | grep -o 'emulator-[0-9]*' | head -1)
-        sleep 1
-    done
-    local -a adb=(adb -s "$emu_serial")
-    echob "Found emulator: $emu_serial"
-
-    # Wait for device to boot
-    echob "Waiting for device to boot..."
-    "${adb[@]}" wait-for-device
-    while [ "$("${adb[@]}" shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
-        sleep 2
-    done
-    echob "Device booted."
-
-    # Set up overlayfs for writable system
-    "${adb[@]}" root
-    "${adb[@]}" wait-for-device
-    echob "Setting up remount (this may reboot the device)..."
-    "${adb[@]}" remount -R
-    "${adb[@]}" wait-for-device
-    while [ "$("${adb[@]}" shell getprop sys.boot_completed 2>/dev/null)" != "1" ]; do
-        sleep 2
-    done
-    "${adb[@]}" root
-    "${adb[@]}" wait-for-device
-    "${adb[@]}" remount
-
-    # Bootstrap adevice_fingerprint on the device
-    echob "Pushing adevice_fingerprint to device..."
-    "${adb[@]}" push "$OUT/system/bin/adevice_fingerprint" /system/bin/adevice_fingerprint
-
-    # Sync build output to device
-    echob "Syncing build to device..."
-    ANDROID_SERIAL=$emu_serial adevice update
-
-    echob "Emulator ready. PID: $emu_pid"
-    echob "For subsequent iterations: m files && adevice update"
+    build_and_sign m "" || return $?
+    local signed_out
+    signed_out="$(signed_product_out)" || return $?
+    bash "$(gettop)/external/xos/xostools/scripts/emulator_session.sh" "$skin" "$signed_out"
 }
 
 function reposync() {

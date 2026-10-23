@@ -22,21 +22,33 @@ cat <<EOF
 Usage: build <target> [lunch target] [module] [noclean]
 
 Targets:
-    full        Full ROM. Builds otapackage and names the OTA package
+    full        Full ROM: the regular build of the installed files and
+                of the steps of otapackage that the signing run does
+                not run, then the signing run of otapackage, which
+                gives the signed OTA package its release name,
                 <custom version>.zip, with a sha256sum file beside it.
-                If KEYS_DIR is an absolute path, builds only the
-                target-files directory and the OTA tools instead, signs
-                the target-files directory in place with the release keys
-                and names the signed OTA package the same way.
-                SDK phone (emulator) targets build the default goal and
-                make no package, signed or not.
-    sign        Re-sign the latest build with release keys (requires lunch)
-    module      Build only the named module. Needs a module name and
-                makes no package.
+                SDK phone (emulator) targets sign the default goal and
+                make no package.
+    sign        Only the signing run of otapackage (requires lunch)
+    module      Build only the named module, then its signing run.
+                Needs a module name and makes no package.
     module-list Build multiple modules
     mm          Builds using mmma. Useful for frameworks or modules
                 which you want to build using mmma/mmm/. Needs a
                 directory and makes no package.
+
+The regular build is a normal build of its goal, with the test keys and
+a placeholder date. The signing run is a build of the final goals with
+the date of the newest file read from the regular build, and with the
+release keys in an absolute KEYS_DIR, or the test keys without KEYS_DIR.
+It runs only the steps that use the keys or the date and the steps that
+read their outputs, and writes the signed outputs into a separate
+directory. Every other step that the goals of the signing run need has
+to be up to date in the regular build. When one is not, the signing run
+stops before any step runs and lists where the regular build has to
+start. The signed OTA package and its release name are in the product
+directory there. The build system sets that directory in
+SIGNED_PRODUCT_OUT.
 
 noclean: use this option to skip cleaning before building
          this is not accepted on module-list

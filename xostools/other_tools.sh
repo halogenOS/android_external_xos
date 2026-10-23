@@ -65,8 +65,12 @@ pushAllXosRepos() {
 }
 
 generateMissingKeys() {
+    if [ -z "$KEYS_DIR" ]; then
+        echo "KEYS_DIR is not set" >&2
+        return 1
+    fi
     TOP="$(gettop)" \
-    KEYS_DIR="${KEYS_DIR:=vendor/halogenOS/private/keys}" \
+    KEYS_DIR="$KEYS_DIR" \
     bash -i \
     "$(gettop)/external/xos/xostools/scripts/generate_missing_keys.sh" $@
 }

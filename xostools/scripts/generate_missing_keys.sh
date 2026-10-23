@@ -58,7 +58,7 @@ for apex in \
     com.android.media com.android.media.swcodec \
     com.android.mediaprovider com.android.nearby.halfsheet \
     com.android.networkstack.tethering com.android.neuralnetworks \
-    com.android.nfcservices \
+    com.android.nfcservices com.android.npumanager \
     com.android.ondevicepersonalization com.android.os.statsd \
     com.android.permission com.android.profiling \
     com.android.resolv com.android.rkpd \
@@ -68,7 +68,7 @@ for apex in \
     com.android.telephonymodules com.android.tethering \
     com.android.tzdata com.android.uwb com.android.uwb.resources \
     com.android.virt com.android.vndk.current \
-    com.android.vndk.current.on_vendor com.android.wifi \
+    com.android.vndk.current.on_vendor com.android.webapp com.android.wifi \
     com.android.wifi.dialog com.android.wifi.resources \
     com.google.pixel.camera.hal com.google.pixel.vibrator.hal \
     com.qorvo.uwb; do
