@@ -69,7 +69,7 @@ class SplineTask:
     upstream_rev: str
     target_branch: str
     is_aosp: bool = False
-    is_tag: bool = False
+    is_tag_or_commit: bool = False
     force_push: bool = False
 
 @dataclass
@@ -259,8 +259,8 @@ def perform_single_reticulation(
         # Checkout the upstream revision to target branch
         update_status(f"Checking out {task.upstream_rev} → {task.target_branch}", add_steps=1)
 
-        if task.is_tag:
-            # Direct checkout of tag
+        if task.is_tag_or_commit:
+            # Direct checkout of the tag or commit
             repo.git.checkout(task.upstream_rev, B=task.target_branch)
         else:
             # Checkout upstream branch
@@ -417,8 +417,8 @@ class SplineReticulator:
                 aosp_project = snippet_root.find(f"project[@path='{path}'][@merge-aosp='true']")
                 is_aosp = aosp_project is not None
 
-                # Initialize is_tag for all projects
-                is_tag = False
+                # Initialize is_tag_or_commit for all projects
+                is_tag_or_commit = False
 
                 if is_aosp:
                     # Handle AOSP project
@@ -460,7 +460,7 @@ class SplineReticulator:
                             upstream_rev = upstream_rev.replace('refs/heads/', '')
                             # Check if this is a tag (AOSP uses refs/tags/ for tags)
                             if '/tags/' in upstream_rev:
-                                is_tag = True
+                                is_tag_or_commit = True
 
                     if not upstream_rev:
                         console.print(f"[red]Unable to determine AOSP upstream revision for {path}[/red]")
@@ -480,8 +480,8 @@ class SplineReticulator:
                         upstream_rev = parts[1] if len(parts) > 1 else "main"
 
                         # Check for tag/commit specification
-                        if len(parts) > 2 and parts[1] == "tag":
-                            is_tag = True
+                        if len(parts) > 2 and parts[1] in ("tag", "commit"):
+                            is_tag_or_commit = True
                             upstream_rev = parts[2]
                     else:
                         # Internal halogenOS repository
@@ -505,7 +505,7 @@ class SplineReticulator:
                     upstream_rev,
                     target_branch,
                     is_aosp=is_aosp,
-                    is_tag=is_tag,
+                    is_tag_or_commit=is_tag_or_commit,
                     force_push=self.force_push
                 )
 
