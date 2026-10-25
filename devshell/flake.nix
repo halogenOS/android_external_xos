@@ -5,10 +5,19 @@
       url = "git+https://git.halogenos.org/halogenOS/android_build_siso?ref=XOS-17.0&shallow=1";
       flake = false;
     };
+    kati-src = {
+      url = "git+https://git.halogenos.org/halogenOS/android_build_kati?ref=XOS-17.0&shallow=1";
+      flake = false;
+    };
   };
 
   outputs =
-    { nixpkgs, siso-src, ... }:
+    {
+      nixpkgs,
+      siso-src,
+      kati-src,
+      ...
+    }:
     let
       forEachSystem = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
       lib = nixpkgs.lib;
@@ -35,8 +44,9 @@
         });
       };
 
-      sisoOverlay = final: prev: {
+      buildToolsOverlay = final: prev: {
         siso = final.callPackage ./siso { src = siso-src; };
+        kati = final.callPackage ./kati { src = kati-src; };
       };
 
       mkPkgs =
@@ -45,7 +55,7 @@
           inherit system;
           overlays = [
             guardedZshOverlay
-            sisoOverlay
+            buildToolsOverlay
           ];
         };
 
@@ -80,6 +90,7 @@
                 gnumake
                 go
                 imagemagick
+                kati
                 libbsd.dev
                 libelf
                 libgcc
@@ -202,7 +213,7 @@
               ];
             }
           );
-          inherit (pkgs) siso;
+          inherit (pkgs) siso kati;
           execShell = fhs "exec-aosp-env" pkgs { } [ ];
           aautoShell =
             let

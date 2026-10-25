@@ -11,7 +11,7 @@ buildGoModule {
   inherit src;
 
   modRoot = "siso";
-  vendorHash = "sha256-L7T2CMR3kLZFVyNdCpW1aLzKdIe8gw/CmmEtq4UC7SQ=";
+  vendorHash = "sha256-XFOO5HL9/IuYuA20ul4ZdJESgGIE2ZclgENch6x+Mnk=";
 
   env.CGO_ENABLED = 0;
 
