@@ -17,15 +17,9 @@
 
 echo -e "\033[0mincluding \033[1m\033[38;5;39mXOS\033[0m\033[1m Tools\033[0m"
 
-# Get the CPU count
-# CPU count is either your virtual cores when using Hyperthreading
-# or your physical core count when not using Hyperthreading
-# Here the virtual cores are always counted, which can be the same as
-# physical cores if not using Hyperthreading or a similar feature.
-CPU_COUNT=$(grep -E '^processor\W' < /proc/cpuinfo | wc -l)
-THREAD_COUNT_BUILD=${THREAD_COUNT_BUILD:=$CPU_COUNT}
-
-if [[ $THREAD_COUNT_BUILD == "auto" ]]; then
+# Without THREAD_COUNT_BUILD, or with it set to auto, the build sizes its
+# job count from the free CPU time and memory of the machine while it runs.
+if [[ -z $THREAD_COUNT_BUILD || $THREAD_COUNT_BUILD == "auto" ]]; then
   THREAD_COUNT_BUILD_ARG=""
 else
   THREAD_COUNT_BUILD_ARG="-j$THREAD_COUNT_BUILD"
@@ -148,7 +142,11 @@ function build() {
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
-                echo "Using $THREAD_COUNT_BUILD threads for build."
+                if [ -n "$THREAD_COUNT_BUILD_ARG" ]; then
+                    echo "Using $THREAD_COUNT_BUILD threads for build."
+                else
+                    echo "Using adaptive job scaling."
+                fi
                 if [ "$buildarg" != "mm" ] && [[ "$target" == *"sdk_phone"* ]]; then
                     echob "Building for SDK phone"
                 fi

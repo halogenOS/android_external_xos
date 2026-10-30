@@ -273,7 +273,7 @@ for named in "full" "full Settings" "module Settings"; do
     reset_case
     output=$(build "$buildarg" sdk_phone64_x86_64-cp2a-userdebug $name noclean 2>&1)
     check "SDK phone $named build prints the SDK phone message after the thread count" \
-        contains_after "$output" "Using auto threads for build." "Building for SDK phone"
+        contains_after "$output" "Using adaptive job scaling." "Building for SDK phone"
 done
 reset_case
 output=$(build mm sdk_phone64_x86_64-cp2a-userdebug packages/apps/Settings noclean 2>&1)
