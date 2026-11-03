@@ -127,18 +127,17 @@ function build() {
 		device=${target#*_}
 		device=${device%%-*}
                 eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
-                # Every build is the regular build of the goal before signing,
-                # then the signing run of the final goals. A full device build
-                # gives the signed OTA package its release name.
+                # A named module or directory gets the regular build only. A
+                # product build is the regular build before signing, then the
+                # signing run of the final goals, and a full device build gives
+                # the signed OTA package its release name.
                 local command=m goals=() finish=print_signed_output
-                if [ -n "$module" ]; then
-                    [ "$buildarg" = "mm" ] && command=mmma
-                    goals=("$module")
-                elif [[ "$target" != *"sdk_phone"* ]]; then
+                [ "$buildarg" = "mm" ] && command=mmma
+                if [[ -z "$module" && "$target" != *"sdk_phone"* ]]; then
                     goals=(otapackage)
                     finish=name_ota_package
                 fi
-                check_keys_dir || return $?
+                [ -n "$module" ] || check_keys_dir || return $?
                 # Clean if desired
                 [[ "$cleanarg" == "noclean" ]] || m clean
                 # Now start building
@@ -150,7 +149,11 @@ function build() {
                 if [ "$buildarg" != "mm" ] && [[ "$target" == *"sdk_phone"* ]]; then
                     echob "Building for SDK phone"
                 fi
-                build_and_sign "$command" "$module" "${goals[@]}" || return $?
+                if [ -n "$module" ]; then
+                    make_goal "$command" "$module" || return $?
+                    return 0
+                fi
+                build_and_sign "$command" "${goals[@]}" || return $?
                 local signed_out
                 signed_out="$(signed_product_out)" || return $?
                 "$finish" "$signed_out" || return $?
@@ -196,23 +199,19 @@ function check_keys_dir() {
     fi
 }
 
-# The regular build with the build command $1 (m or mmma), then the signing
-# run of the final goals that follow $2, or of the default goal when none
-# follow. For a module or directory $2, the regular build builds $2 and passes
-# no signing goals, since the signing run builds the same goal. When $2 is
-# empty, the regular build covers the whole product: it builds the installed
-# files, and every step that the final goals need except the steps that the
-# signing run runs, the steps that use the keys or the date and the steps that
-# read their outputs.
+# The regular build of the goals that follow the build command $1 (m or mmma)
+function make_goal() {
+    "$1" --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${@:2}"
+}
+
+# The regular build of the whole product with the build command $1, then the
+# signing run of the final goals that follow $1, or of the default goal when
+# none follow. The regular build builds the installed files, and every step
+# that the final goals need except the steps that the signing run runs, the
+# steps that use the keys or the date and the steps that read their outputs.
 function build_and_sign() {
-    local regular_args
-    if [ -n "$2" ]; then
-        regular_args=("$2")
-    else
-        regular_args=(--signing-goals="$(IFS=,; echo "${*:3}")" files)
-    fi
-    "$1" --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${regular_args[@]}" || return $?
-    sign_build "$1" "${@:3}"
+    make_goal "$1" --signing-goals="$(IFS=,; echo "${*:2}")" files || return $?
+    sign_build "$1" "${@:2}"
 }
 
 # The signing run: the build of the goals with the build command $1, with the
@@ -315,7 +314,7 @@ function emu() {
     eval "lunch ${target//-/ }" || (breakfast $device && eval "lunch ${target//-/ }") || return 1
 
     echob "Building (including images for emulator)..."
-    build_and_sign m "" || return $?
+    build_and_sign m || return $?
     local signed_out
     signed_out="$(signed_product_out)" || return $?
     bash "$(gettop)/external/xos/xostools/scripts/emulator_session.sh" "$skin" "$signed_out"

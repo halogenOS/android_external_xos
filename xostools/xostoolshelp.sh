@@ -30,7 +30,7 @@ Targets:
                 SDK phone (emulator) targets sign the default goal and
                 make no package.
     sign        Only the signing run of otapackage (requires lunch)
-    module      Build only the named module, then its signing run.
+    module      Build only the named module, without a signing run.
                 Needs a module name and makes no package.
     module-list Build multiple modules
     mm          Builds using mmma. Useful for frameworks or modules

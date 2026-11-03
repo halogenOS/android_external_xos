@@ -241,10 +241,9 @@ for keys in "" "$tmp/keys"; do
         printf 'unsigned-ota' > "$out/aosp_dev-ota.zip"
         output=$(KEYS_DIR="$keys" build "$buildarg" aosp_dev-cp2a-userdebug "$name" noclean 2>&1)
         check "$label succeeds" [ $? -eq 0 ]
-        check "$label builds what is named, then signs it" \
-            only_build_call "$tool --skip-soong-tests $name
-$tool --skip-soong-tests ${keys:+--signing-keys-dir=$keys }--signing-run $name"
-        check "$label prints the signed output" contains "$output" "Signed output: $out"
+        check "$label builds what is named and skips the signing run" \
+            only_build_call "$tool --skip-soong-tests $name"
+        check "$label does not print a signed output" not_contains "$output" "Signed output"
         check "$label makes no package" \
             no_packages_in "$out" "$out/aosp_dev-ota.zip"
     done
