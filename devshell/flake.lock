@@ -3,10 +3,10 @@
     "kati-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793647204,
-        "narHash": "sha256-pdauwuUKJSy6UkvZB/MesYQrRMmqEDM3Wqyni3HjT9M=",
+        "lastModified": 1793721913,
+        "narHash": "sha256-oyzvSlVtBUI3lNudgze4j2uaK/ZbziM7tdOVJsRuCyI=",
         "ref": "XOS-17.0",
-        "rev": "9419e8888e450be28d1c8ec5dc1573df54a2a75c",
+        "rev": "6127cb980caaabe3ecb066a9a3381489c26b1705",
         "shallow": true,
         "type": "git",
         "url": "https://git.halogenos.org/halogenOS/android_build_kati"
