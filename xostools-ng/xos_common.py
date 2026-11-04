@@ -541,11 +541,13 @@ class GitOperations:
                    quiet: bool = False) -> bool:
         try:
             repo = git.Repo(repo_path)
+            existing = next((r for r in repo.remotes if r.name == remote_name), None)
 
-            try:
-                repo.delete_remote(remote_name)
-            except:
-                pass
+            if existing is not None:
+                if (list(existing.urls) == [remote_url]
+                        and not existing.config_reader.has_option('pushurl')):
+                    return True
+                repo.delete_remote(existing)
 
             repo.create_remote(remote_name, remote_url)
             return True
