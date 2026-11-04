@@ -485,38 +485,6 @@ def push_worker(task_queue: queue.Queue, progress, push_task, stats: MirrorStats
 
     return successful, failed
 
-def perform_repo_sync(args):
-    """Perform repo sync using the repo tool."""
-    import subprocess
-
-    console.print("\n[bold]Running reporeset...[/bold]")
-    # Reset manifest first
-    manifest_dir = Path('.repo/manifests')
-    if manifest_dir.exists():
-        try:
-            import git
-            manifest_repo = git.Repo(manifest_dir)
-            rom_revision = os.environ['ROM_REVISION']
-            manifest_repo.remotes.origin.fetch()
-            manifest_repo.head.reference = manifest_repo.remotes.origin.refs[rom_revision]
-            manifest_repo.head.reset(index=True, working_tree=True)
-        except Exception as e:
-            console.print(f"[yellow]Warning:[/yellow] Failed to reset manifest: {e}")
-
-    # Use repo tool for sync
-    result = subprocess.run(
-        ['repo', 'sync', '--force-sync', '-c', '--no-clone-bundle',
-         '--no-tags', '-j', str(args.jobs)],
-        capture_output=True, text=True
-    )
-
-    if result.returncode != 0:
-        console.print(f"[red]Error:[/red] reposync failed\n{result.stderr}")
-        return False
-
-    console.print("[green]Sync completed successfully[/green]")
-    return True
-
 def should_skip_vendor_repo(project_path: str) -> bool:
     """Check if vendor repo should be skipped based on path components."""
     if not project_path.startswith('vendor/'):
@@ -570,12 +538,8 @@ def main():
     parser = argparse.ArgumentParser(
         description='Mirror all repositories to GitHub'
     )
-    parser.add_argument('--no-reset', action='store_true',
-                       help='Skip repo reset and sync')
     parser.add_argument('--workers', type=int, default=4,
                        help='Number of parallel workers (default: 4)')
-    parser.add_argument('--jobs', type=int, default=4,
-                       help='Number of sync jobs for repo tool (default: 4)')
     parser.add_argument('--push-all', action='store_true',
                        help='Push every branch and tag, even the ones already up to date on the mirror')
     args = parser.parse_args()
@@ -594,22 +558,6 @@ def main():
     if not snippet_path.exists():
         console.print(f"[red]Error:[/red] Manifest snippet not found at {snippet_path}")
         sys.exit(1)
-
-    # Perform reset and sync if not skipped
-    if not args.no_reset:
-        console.print("[yellow]Warning:[/yellow] This will perform a reporeset and a reposync to make sure")
-        console.print("everything is up to date before doing the merges")
-        console.print("If you do not want that to happen, abort now using CTRL+C")
-        console.print("and use the parameter --no-reset")
-        console.print("Otherwise, just confirm with ENTER")
-        try:
-            input()
-        except KeyboardInterrupt:
-            console.print("\n[red]Aborted.[/red]")
-            sys.exit(0)
-
-        if not perform_repo_sync(args):
-            sys.exit(1)
 
     # Parse main manifest
     manifest = ManifestParser(snippet_path)
