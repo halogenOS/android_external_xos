@@ -182,15 +182,16 @@ function build() {
     return 0
 }
 
-# Fails unless KEYS_DIR is unset or is a directory with release keys
+# Fails unless KEYS_DIR is unset or contains every key that generateMissingKeys
+# makes
 function check_keys_dir() {
     [ -z "$KEYS_DIR" ] && return 0
     if [[ "$KEYS_DIR" != /* ]]; then
         echo "KEYS_DIR needs an absolute path, got $KEYS_DIR" >&2
         return 1
     fi
-    if [ ! -f "$KEYS_DIR/releasekey.pk8" ]; then
-        echo "No release keys found in $KEYS_DIR" >&2
+    if ! KEYS_DIR="$KEYS_DIR" bash "$(gettop)/external/xos/xostools/scripts/generate_missing_keys.sh" --check; then
+        echo "Run generateMissingKeys to generate the missing keys." >&2
         return 1
     fi
 }
