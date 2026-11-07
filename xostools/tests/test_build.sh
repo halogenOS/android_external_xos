@@ -5,7 +5,10 @@
 # Runs the build command against stubs of the build system and its output.
 # Needs no source tree, no build and no network.
 
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# zsh stops at a pattern that matches nothing, which bash leaves as it is
+[ -n "$ZSH_VERSION" ] && setopt null_glob
+
+repo="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 tmp="$(mktemp -d)" || exit 1
 trap 'rm -rf "$tmp"' EXIT
 
@@ -278,6 +281,13 @@ reset_case
 output=$(build mm sdk_phone64_x86_64-cp2a-userdebug packages/apps/Settings noclean 2>&1)
 check "SDK phone mm build does not print the SDK phone message" \
     not_contains "$output" "Building for SDK phone"
+
+# The devshell starts zsh, so the same checks run there. zsh rejects bash-only
+# syntax such as local -n and the function carries on, here with an empty
+# argument in place of --signing-run.
+if [ -n "$BASH_VERSION" ]; then
+    zsh -f "${BASH_SOURCE[0]}" || failures=$((failures + 1))
+fi
 
 if [ "$failures" -ne 0 ]; then
     echo "$failures check(s) failed" >&2

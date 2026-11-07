@@ -217,22 +217,15 @@ function build_and_sign() {
 # The signing run: the build of the goals with the build command $1, with the
 # release keys in KEYS_DIR or the test keys when KEYS_DIR is unset
 function sign_build() {
-    local args
-    signing_args args || return $?
-    "$1" --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${args[@]}" "${@:2}"
-}
-
-# Sets the array named $1 to the arguments that make a build the signing run
-function signing_args() {
     check_keys_dir || return $?
-    local -n args_ref="$1"
-    args_ref=(--signing-run)
+    local args=(--signing-run)
     if [ -n "$KEYS_DIR" ]; then
-        args_ref=(--signing-keys-dir="$KEYS_DIR" "${args_ref[@]}")
+        args=(--signing-keys-dir="$KEYS_DIR" "${args[@]}")
         echob "Signing with the keys in $KEYS_DIR..."
     else
         echob "Signing with the test keys..."
     fi
+    "$1" --skip-soong-tests $THREAD_COUNT_BUILD_ARG "${args[@]}" "${@:2}"
 }
 
 # Prints the product output directory of the signing run, which the build
