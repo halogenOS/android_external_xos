@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 {
   stdenv,
+  mimalloc,
   src,
 }:
 
@@ -10,6 +11,11 @@ stdenv.mkDerivation {
   version = src.shortRev;
 
   inherit src;
+
+  # The glibc allocator uses a large share of the CPU time used by Kati.
+  # Linked in, mimalloc replaces malloc and free for the whole process.
+  buildInputs = [ mimalloc ];
+  env.NIX_LDFLAGS = "-lmimalloc";
 
   # -march=native would tie the binary to the CPU of the machine that built it,
   # and the compiler wrapper drops it anyway, with a warning for every file.
