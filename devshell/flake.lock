@@ -3,10 +3,10 @@
     "kati-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793721913,
-        "narHash": "sha256-oyzvSlVtBUI3lNudgze4j2uaK/ZbziM7tdOVJsRuCyI=",
+        "lastModified": 1794058319,
+        "narHash": "sha256-uTUXtS3ZvyOlpXzep51LMTiptpo9NRueDYDEQsKGAoM=",
         "ref": "XOS-17.0",
-        "rev": "6127cb980caaabe3ecb066a9a3381489c26b1705",
+        "rev": "1265c82b91fc1ea48d5a9bc17b3ef449a0699b0c",
         "shallow": true,
         "type": "git",
         "url": "https://git.halogenos.org/halogenOS/android_build_kati"
@@ -44,10 +44,10 @@
     "siso-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793892966,
-        "narHash": "sha256-orXiuF14lJ3Zj+8SPf9OHagM++c/RC5wiYqlbH8/kN8=",
+        "lastModified": 1794262413,
+        "narHash": "sha256-DWneE/ruKJ4uI0VJ/U81QUMoHbUY67AzpekYVfHUra4=",
         "ref": "XOS-17.0",
-        "rev": "bc1f9892520a20b6ae8247ba10a4ee4f252da6fd",
+        "rev": "4fc6a5f2c236b1dd2572deff5639da07230e4f06",
         "shallow": true,
         "type": "git",
         "url": "https://git.halogenos.org/halogenOS/android_build_siso"
